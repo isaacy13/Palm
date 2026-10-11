@@ -214,6 +214,10 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(navigation?.contains("CrossImports") == true)
         let navigationText = try String(contentsOfFile: try XCTUnwrap(navigation))
         XCTAssertTrue(navigationText.hasPrefix("import _MapKit_SwiftUI\n"))
+        let mapUtilities = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("MapUtilities") }
+        XCTAssertTrue(mapUtilities?.contains("CrossImports") == true)
+        let mapUtilitiesText = try String(contentsOfFile: try XCTUnwrap(mapUtilities))
+        XCTAssertTrue(mapUtilitiesText.hasPrefix("import _MapKit_SwiftUI\n"))
         let charts = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("WeatherChartsView") }
         XCTAssertTrue(charts?.contains("EntryExpanded") == true)
         let chartsText = try String(contentsOfFile: try XCTUnwrap(charts))

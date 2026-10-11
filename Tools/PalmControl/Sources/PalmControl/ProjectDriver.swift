@@ -1304,18 +1304,55 @@ private func imports(in files: [URL]) -> Set<String> {
     for url in files {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
         for line in text.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard trimmed.hasPrefix("import ") else { continue }
-            let rest = trimmed.dropFirst("import ".count)
-            guard let token = rest.split(separator: " ").first else { continue }
-            if token == "class" || token == "struct" || token == "enum" || token == "func" || token == "typealias" {
-                continue
+            if let name = importedModuleName(on: line) {
+                names.insert(name)
             }
-            let head = token.split(separator: ".").first.map(String.init) ?? String(token)
-            if !head.isEmpty { names.insert(head) }
         }
     }
     return names
+}
+
+/// `import MapKit`, `@preconcurrency import MapKit`, and `public import MapKit`
+/// all name the same module. Attribute and access-level prefixes have to be
+/// stripped or a cross-import overlay is skipped for that file.
+private func importedModuleName(on line: some StringProtocol) -> String? {
+    var rest = line.trimmingCharacters(in: .whitespaces)
+    if rest.hasPrefix("//") || rest.hasPrefix("/*") { return nil }
+    while rest.hasPrefix("@") || accessLevelPrefix(rest) != nil {
+        if rest.hasPrefix("@") {
+            if let open = rest.firstIndex(of: "("), !rest[..<open].contains(where: { $0 == " " || $0 == "\t" }) {
+                guard let close = rest[open...].firstIndex(of: ")") else { return nil }
+                rest = rest[rest.index(after: close)...].trimmingCharacters(in: .whitespaces)
+            } else if let space = rest.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+                rest = rest[rest.index(after: space)...].trimmingCharacters(in: .whitespaces)
+            } else {
+                return nil
+            }
+            continue
+        }
+        if let prefix = accessLevelPrefix(rest) {
+            rest = rest.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+            continue
+        }
+        break
+    }
+    guard rest.hasPrefix("import ") || rest.hasPrefix("import\t") else { return nil }
+    let after = rest.dropFirst("import".count).trimmingCharacters(in: .whitespaces)
+    guard let token = after.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == ";" }).first else { return nil }
+    if token == "class" || token == "struct" || token == "enum" || token == "func" || token == "typealias" || token == "let" || token == "var" {
+        return nil
+    }
+    let head = token.split(separator: ".").first.map(String.init) ?? String(token)
+    return head.isEmpty ? nil : head
+}
+
+private func accessLevelPrefix(_ rest: some StringProtocol) -> String? {
+    for prefix in ["public", "internal", "fileprivate", "private", "package", "open"] {
+        guard rest.hasPrefix(prefix) else { continue }
+        let next = rest.dropFirst(prefix.count)
+        if next.first == " " || next.first == "\t" { return prefix }
+    }
+    return nil
 }
 
 private func importsAcrossProject(objects: [String: PbxValue], projectDirectory: URL) -> Set<String> {
