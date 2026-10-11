@@ -185,6 +185,15 @@ final class ControlTests: XCTestCase {
         })
         XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.sources.contains { $0.contains("ExperimentalFlags.swift") } }), "5")
         XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.moduleName == "Toasts" }), "6")
+        XCTAssertTrue(build.compileJobs.contains { job in
+            job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("EpoxyCore/Views/ViewType.swift") }
+        })
+        XCTAssertTrue(build.compileJobs.contains { job in
+            job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("ZipFoundation/Archive.swift") }
+        })
+        XCTAssertTrue(build.compileJobs.contains { job in
+            job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("EpoxyCore/Model/EpoxyModeled.swift") }
+        })
         XCTAssertTrue(build.compileJobs.contains { $0.tool == "swiftc" && $0.arguments.contains("1000000") })
         let moduleOrder = build.compileJobs.map(\.moduleName)
         if let promises = moduleOrder.firstIndex(of: "Promises"), let sessions = moduleOrder.firstIndex(of: "FirebaseSessions") {

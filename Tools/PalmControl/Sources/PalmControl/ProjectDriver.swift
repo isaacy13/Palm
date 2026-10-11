@@ -556,10 +556,14 @@ private func collectSources(at root: URL, swift: inout [URL], clang: inout [URL]
     let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
     for case let url as URL in enumerator {
         let relative = url.path.hasPrefix(rootPrefix) ? String(url.path.dropFirst(rootPrefix.count)) : url.lastPathComponent
-        if skip.contains(url.lastPathComponent) || isExcluded(relative, by: excluding) {
+        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        // skipDescendants() on a file also skips the next directory. Excluded
+        // README.md files were dropping EpoxyCore/Views on the phone.
+        if isDirectory && (skip.contains(url.lastPathComponent) || isExcluded(relative, by: excluding)) {
             enumerator.skipDescendants()
             continue
         }
+        if isExcluded(relative, by: excluding) { continue }
         if url.lastPathComponent == "Package.swift" || url.lastPathComponent == "Button+AppIntents.swift" { continue }
         switch url.pathExtension {
         case "swift":
