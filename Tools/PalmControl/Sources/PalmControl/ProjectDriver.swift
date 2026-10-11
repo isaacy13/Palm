@@ -123,6 +123,7 @@ public struct ProjectDriver {
             throw ControlError.missingProject(pbxproj.path)
         }
         let projectDirectory = xcodeproj.deletingLastPathComponent()
+        repairMapKitCameraInterface(sdkRoot: context.sdkRoot)
         let text = try String(contentsOf: pbxproj, encoding: .utf8)
         let objects = try PbxParser.objects(in: text)
         guard let target = nativeTarget(named: name, objects: objects) else {
@@ -425,6 +426,50 @@ private func nativeTarget(named name: String, objects: [String: PbxValue]) -> [S
         return object
     }
     return nil
+}
+
+/// The iOS 26.5 `_MapKit_SwiftUI` interface uses `MapCamera` and
+/// `MapCameraPosition` in `Map` initializers and never declares them.
+/// Declare the same stored shape so client code and those initializers agree.
+private func repairMapKitCameraInterface(sdkRoot: URL) {
+    let interface = sdkRoot.appendingPathComponent(
+        "System/Library/Frameworks/_MapKit_SwiftUI.framework/Modules/_MapKit_SwiftUI.swiftmodule/arm64e-apple-ios.swiftinterface"
+    )
+    guard var text = try? String(contentsOf: interface, encoding: .utf8) else { return }
+    guard !text.contains("public struct MapCamera :") else { return }
+    text += """
+
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+    public struct MapCamera : Swift.Equatable {
+      public var centerCoordinate: _LocationEssentials.CLLocationCoordinate2D
+      public var distance: Swift.Double
+      public var heading: Swift.Double
+      public var pitch: Swift.Double
+      public static func == (lhs: _MapKit_SwiftUI.MapCamera, rhs: _MapKit_SwiftUI.MapCamera) -> Swift.Bool
+      public init(centerCoordinate: _LocationEssentials.CLLocationCoordinate2D, distance: Swift.Double, heading: Swift.Double = 0, pitch: Swift.Double = 0)
+      public init(_ camera: MapKit.MKMapCamera)
+    }
+    @available(iOS 17.0, macOS 14.0, watchOS 10.0, tvOS 17.0, *)
+    public struct MapCameraPosition : Swift.Equatable {
+      public static var automatic: _MapKit_SwiftUI.MapCameraPosition { get }
+      public static func camera(_ camera: _MapKit_SwiftUI.MapCamera) -> _MapKit_SwiftUI.MapCameraPosition
+      public static func region(_ region: MapKit.MKCoordinateRegion) -> _MapKit_SwiftUI.MapCameraPosition
+      public static func rect(_ rect: MapKit.MKMapRect) -> _MapKit_SwiftUI.MapCameraPosition
+      public static func item(_ item: MapKit.MKMapItem, allowsAutomaticPitch: Swift.Bool = true) -> _MapKit_SwiftUI.MapCameraPosition
+      public static func userLocation(followsHeading: Swift.Bool = false, fallback: _MapKit_SwiftUI.MapCameraPosition) -> _MapKit_SwiftUI.MapCameraPosition
+      public var camera: _MapKit_SwiftUI.MapCamera? { get }
+      public var region: MapKit.MKCoordinateRegion? { get }
+      public var rect: MapKit.MKMapRect? { get }
+      public var item: MapKit.MKMapItem? { get }
+      public var positionedByUser: Swift.Bool { get }
+      public var followsUserLocation: Swift.Bool { get }
+      public var followsUserHeading: Swift.Bool { get }
+      public var fallbackPosition: _MapKit_SwiftUI.MapCameraPosition? { get }
+      public var allowsAutomaticPitch: Swift.Bool { get }
+      public static func == (a: _MapKit_SwiftUI.MapCameraPosition, b: _MapKit_SwiftUI.MapCameraPosition) -> Swift.Bool
+    }
+    """
+    try? text.write(to: interface, atomically: true, encoding: .utf8)
 }
 
 private func swiftLanguageArguments(from settings: [String: String]) -> [String] {

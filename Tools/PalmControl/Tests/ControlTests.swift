@@ -124,6 +124,10 @@ final class ControlTests: XCTestCase {
         modules:
           - name: _MapKit_SwiftUI
         """.write(to: cross.appendingPathComponent("SwiftUI.swiftoverlay"), atomically: true, encoding: .utf8)
+        let interfaceDirectory = context.sdkRoot.appendingPathComponent("System/Library/Frameworks/_MapKit_SwiftUI.framework/Modules/_MapKit_SwiftUI.swiftmodule")
+        try FileManager.default.createDirectory(at: interfaceDirectory, withIntermediateDirectories: true)
+        let mapInterface = interfaceDirectory.appendingPathComponent("arm64e-apple-ios.swiftinterface")
+        try "public struct MapFeature {}\n".write(to: mapInterface, atomically: true, encoding: .utf8)
         let driver = ProjectDriver()
         let build = try driver.plan(project: project, target: "GuideAI", kind: .build, tests: ["Ignored"], context: context)
         XCTAssertEqual(build.bundleIdentifier, "com.onexengineering.GuideAI")
@@ -216,6 +220,9 @@ final class ControlTests: XCTestCase {
         XCTAssertFalse(chartsText.contains("@Entry"))
         XCTAssertTrue(chartsText.contains("struct __Key_weatherChartEmbedded: EnvironmentKey"))
         XCTAssertTrue(chartsText.contains("struct __Key_weatherChartPlotHeight: EnvironmentKey"))
+        let repairedInterface = try String(contentsOf: mapInterface, encoding: .utf8)
+        XCTAssertTrue(repairedInterface.contains("public struct MapCamera :"))
+        XCTAssertTrue(repairedInterface.contains("public struct MapCameraPosition :"))
         XCTAssertTrue(build.compileJobs.contains { $0.tool == "swiftc" && $0.arguments.contains("1000000") })
         let moduleOrder = build.compileJobs.map(\.moduleName)
         if let promises = moduleOrder.firstIndex(of: "Promises"), let sessions = moduleOrder.firstIndex(of: "FirebaseSessions") {
