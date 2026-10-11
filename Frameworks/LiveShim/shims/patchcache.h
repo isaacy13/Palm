@@ -45,6 +45,7 @@ enum {
 };
 
 extern uint64_t patchcache[kDyldPtrCount];
+extern int palm_patchcache_status;
 
 bool ksurface_user_patchcache_load(void);
 

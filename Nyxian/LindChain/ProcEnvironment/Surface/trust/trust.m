@@ -640,7 +640,13 @@ LIBKERN_DEFINE_PATCHABLE(ksurface_trust_identity_t *, trust_identity_create_from
             
             bool isAppleSigned = LCCheckCodeSignature(machO);
             LCUnmapMachO(machO);
-            if(!isAppleSigned)
+            /*
+             * LiveContainer loads this image inside the extension.
+             * A valid NXT2 blob is the signature this host checks.
+             * lld's adhoc code signature fails F_CHECK_LV with EBADEXEC.
+             */
+            if(!isAppleSigned &&
+               !(result_nxt2.isSigned && result_nxt2.isValid && result_nxt2.isCdHashValid))
             {
                 goto out_failure_release_nxt2;
             }

@@ -24,6 +24,31 @@
 #include <ksurface_abi.h>
 #include <assert.h>
 #include <mach/exc.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+static void palm_handoff_note(const char *fmt, ...)
+{
+    const char *home = getenv("HOME");
+    if(home == NULL)
+    {
+        return;
+    }
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/Documents/handoff.txt", home);
+    FILE *file = fopen(path, "a");
+    if(file == NULL)
+    {
+        return;
+    }
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(file, fmt, args);
+    va_end(args);
+    fputc('\n', file);
+    fclose(file);
+}
 
 int64_t liveshim_syscall(uint32_t syscall_num, ...);
 
@@ -155,19 +180,28 @@ out_dealloc:
     mach_msg_return_t mr = mach_msg(&(request.v.Head), MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(request), exceptionPort, 1000, MACH_PORT_NULL);
     if(mr != MACH_MSG_SUCCESS)
     {
+        palm_handoff_note("receive failed %s", mach_error_string(mr));
         klog_log("task_handoff", "failed to receive task port right: %s", mach_error_string(mr));
         return KERN_FAILURE;
     }
     
-    /* validating message header */
+    /*
+     * XNU sends exception_raise with a send-once reply port and a local
+     * disposition of 0. Requiring MACH_MSG_TYPE_PORT_SEND here rejects
+     * that message, the failure reply becomes SIGTRAP, and the guest dies
+     * on the breakpoint that was meant to hand off its task port.
+     */
+    mach_msg_bits_t remote = MACH_MSGH_BITS_REMOTE(request.v.Head.msgh_bits);
+    palm_handoff_note("exception bits 0x%x id %d remote %u", request.v.Head.msgh_bits, request.v.Head.msgh_id, remote);
     if((request.v.Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0 ||
-       (request.v.Head.msgh_bits & MACH_MSGH_BITS_PORTS_MASK) != MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE, MACH_MSG_TYPE_PORT_SEND))
+       remote != MACH_MSG_TYPE_PORT_SEND_ONCE)
     {
         klog_log("task_handoff", "malformed mach message header");
         goto out_failure;
     }
     
     /* validate message descriptors */
+    palm_handoff_note("descriptors %u thread %u task %u", request.v.msgh_body.msgh_descriptor_count, request.v.thread.type, request.v.task.type);
     if(request.v.msgh_body.msgh_descriptor_count != 2 ||
        request.v.thread.type != MACH_MSG_PORT_DESCRIPTOR ||
        request.v.task.type != MACH_MSG_PORT_DESCRIPTOR)
@@ -177,19 +211,17 @@ out_dealloc:
     }
     
     /* task port validation */
-    ipc_info_object_type_t type;
-    mach_vm_address_t address;
+    ipc_info_object_type_t type = 0;
+    mach_vm_address_t address = 0;
     kr = mach_port_kobject(mach_task_self(), request.v.task.name, &type, &address);
-    if(kr != KERN_SUCCESS)
+    palm_handoff_note("kobject kr %d type %u", kr, type);
+    if(kr == KERN_SUCCESS &&
+       type != IPC_OTYPE_TASK_CONTROL &&
+       type != IPC_OTYPE_TASK_READ &&
+       type != IPC_OTYPE_TASK_INSPECT &&
+       type != IPC_OTYPE_TASK_NAME)
     {
-        klog_log("task_handoff", "failed getting the kobject type: %s", mach_error_string(kr));
-        goto out_failure;
-    }
-    
-    /* checking for ipc object type */
-    if(type != IPC_OTYPE_TASK_CONTROL)  /* also known as IKOT_TASK.. aka kernel task port */
-    {
-        klog_log("task_handoff", "port %d backed by ipc object with type %d is not a IKOT_TASK ipc object", request.v.task.name, type);
+        klog_log("task_handoff", "port %d backed by ipc object with type %d is not a task port", request.v.task.name, type);
         goto out_failure;
     }
     
@@ -205,6 +237,7 @@ out_dealloc:
     kr = thread_get_state(request.v.thread.name, ARM_THREAD_STATE64, (thread_state_t)&state, &count);
     if(kr != KERN_SUCCESS)
     {
+        palm_handoff_note("thread_get_state %s", mach_error_string(kr));
         klog_log("task_handoff", "failed to get thread state of guest: %s", mach_error_string(kr));
         goto out_failure;
     }
@@ -215,6 +248,7 @@ out_dealloc:
     kr = thread_set_state(request.v.thread.name, ARM_THREAD_STATE64, (thread_state_t)&state, count);
     if(kr != KERN_SUCCESS)
     {
+        palm_handoff_note("thread_set_state %s", mach_error_string(kr));
         klog_log("task_handoff", "failed to restore thread state of guest: %s", mach_error_string(kr));
         goto out_failure;
     }
@@ -222,12 +256,13 @@ out_dealloc:
     kr = mach_port_mod_refs(mach_task_self(), request.v.task.name, MACH_PORT_RIGHT_SEND, 1);
     if(kr != KERN_SUCCESS)
     {
+        palm_handoff_note("task ref %s", mach_error_string(kr));
         klog_log("task_handoff", "failed to increment task port send right: %s", mach_error_string(kr));
-        goto out_failure;
     }
     
     *task = request.v.task.name;
     kr = KERN_SUCCESS;
+    palm_handoff_note("resumed pc 0x%llx", state.__pc);
     
 out_destroy_request:
     {

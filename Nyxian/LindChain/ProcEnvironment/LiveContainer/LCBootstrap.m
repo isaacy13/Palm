@@ -32,9 +32,15 @@
 
 #include <dlfcn.h>
 #include <execinfo.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
+#include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <LiveShim/patchcache.h>
 #import <LindChain/ProcEnvironment/litehook/litehook.h>
 #import <LindChain/ProcEnvironment/LiveContainer/Tweaks/Tweaks.h>
 #include <mach-o/ldsyms.h>
@@ -86,17 +92,48 @@ int hook__NSGetExecutablePath_overwriteExecPath(char*** dyldApiInstancePtr, char
     return 0;
 }
 
+static void palm_guest_trace(const char *line)
+{
+    if(line == NULL)
+    {
+        return;
+    }
+    const char *root = getenv("NXROOT");
+    if(root == NULL || root[0] == '\0')
+    {
+        return;
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/boot/guest.txt", root);
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if(fd < 0)
+    {
+        return;
+    }
+    write(fd, line, strlen(line));
+    write(fd, "\n", 1);
+    close(fd);
+}
+
 void LCOverwriteExecutablePath(NSString *executablePath)
 {
     /*
      * dyld4 stores executable path in a different place (iOS 15.0 +)
      * https://github.com/apple-oss-distributions/dyld/blob/ce1cc2088ef390df1c48a1648075bbd51c5bbc6a/dyld/DyldAPIs.cpp#L802
+     *
+     * The vtable hook needs boot/patchfinder.bin. Without that file the
+     * real _NSGetExecutablePath runs, and a NULL size pointer is a crash.
      */
-    int (*orig__NSGetExecutablePath)(void* dyldPtr, char* buf, uint32_t* bufsize);
-    performHookDyldApiFast(kDyldNSGetExecutablePathVTFN, (void**)&orig__NSGetExecutablePath, hook__NSGetExecutablePath_overwriteExecPath);
-    _NSGetExecutablePath((char*)[executablePath UTF8String], NULL);
-    /* put the original function back */
-    performHookDyldApiFast(kDyldNSGetExecutablePathVTFN, nil, orig__NSGetExecutablePath);
+    int (*orig__NSGetExecutablePath)(void* dyldPtr, char* buf, uint32_t* bufsize) = NULL;
+    bool hooked = performHookDyldApiFast(kDyldNSGetExecutablePathVTFN, (void**)&orig__NSGetExecutablePath, hook__NSGetExecutablePath_overwriteExecPath);
+    char note[160];
+    snprintf(note, sizeof(note), "overwrite hook=%d cache=%d", hooked, palm_patchcache_status);
+    palm_guest_trace(note);
+    if(hooked)
+    {
+        _NSGetExecutablePath((char*)[executablePath UTF8String], NULL);
+        performHookDyldApiFast(kDyldNSGetExecutablePathVTFN, nil, orig__NSGetExecutablePath);
+    }
     
     /* overwriting remaining upper systems */
     NSString *procName = [executablePath lastPathComponent];
@@ -139,9 +176,14 @@ int LCBootstrapMain(NSString *executablePath,
     appExecutableHandle = guestHandle;
     if(!guestHandle || (uint64_t)guestHandle > 0xf00000000000)
     {
-        fprintf(stderr, "%s\n", dlerror());
+        const char *reason = dlerror();
+        char note[2048];
+        snprintf(note, sizeof(note), "dlopen failed cache=%d pectl=%lld %s", palm_patchcache_status, (long long)ret, reason ?: "no dlerror");
+        palm_guest_trace(note);
+        fprintf(stderr, "%s\n", reason ?: "dlopen failed");
         return 1;
     }
+    palm_guest_trace("dlopen ok");
     
     /* find main */
     int (*guestMain)(int, char**, char **, const char *) = PEGetMachOEntryPointOfHeader(guestHandle)?: dlsym(guestHandle, "main");

@@ -1,6 +1,9 @@
 **/.DS_store
 Frameworks/CoreCompiler/CoreCompilerSupportLibs/
 build/
+.build/
+Tools/PalmHostApp/Prebuilt/
+Tools/PalmHostApp/build/
 *.ipa
 *.deb
 *.tipa

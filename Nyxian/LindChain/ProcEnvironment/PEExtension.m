@@ -28,6 +28,9 @@
 #import <LindChain/IDEFoundation/NXBootstrap.h>
 #import <ksurface_config.h>
 #import <objc/runtime.h>
+#include <stdio.h>
+
+extern char palm_spawn_step[240];
 
 static const char kNSExtensionKey;
 static const char kIdentifierKey;
@@ -158,10 +161,11 @@ FBProcess *PESpawnFBProcess(NSDictionary *items,
      * isint that the moment in movies where exactly
      * something unexpected like that is the case.. ugh
      */
-    NSError *error;
+    NSError *error = nil;
     NSUUID *identifier = [extension beginExtensionRequestWithInputItems:@[item] error:&error];
     if(error != nil || identifier == nil)
     {
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "extension %s", (error.localizedDescription ?: @"nil identifier").UTF8String);
         [extension _kill:SIGKILL];
         return nil;
     }
@@ -173,6 +177,7 @@ FBProcess *PESpawnFBProcess(NSDictionary *items,
     pid_t pid = [extension pidForRequestIdentifier:identifier];
     if(pid <= 0)
     {
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "extension pid %d", pid);
         [extension _kill:SIGKILL];
         return nil;
     }
@@ -182,6 +187,7 @@ FBProcess *PESpawnFBProcess(NSDictionary *items,
     RBSProcessHandle *processHandle = [PrivClass(RBSProcessHandle) handleForPredicate:predicate error:&error];
     if(processHandle == nil || error != nil)
     {
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "rbs %s", (error.localizedDescription ?: @"nil handle").UTF8String);
         [extension _kill:SIGKILL];
         return nil;
     }
@@ -189,6 +195,7 @@ FBProcess *PESpawnFBProcess(NSDictionary *items,
     audit_token_t at = processHandle.auditToken;    /* entry to validation */
     if(at.val[5] != pid)
     {
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "audit %d pid %d", at.val[5], pid);
         [extension _kill:SIGKILL];
         return nil;
     }
@@ -206,6 +213,7 @@ FBProcess *PESpawnFBProcess(NSDictionary *items,
     FBProcess *process = [manager registerProcessForAuditToken:processHandle.auditToken];
     if(process == nil)
     {
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "fb register nil");
         [extension _kill:SIGKILL];
         return nil;
     }

@@ -1,0 +1,72 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA0000000000000000000001 /* SwiftUIUIKit */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000001;
+			fileSystemSynchronizedGroups = (
+				CC0000000000000000000001 /* SwiftUIUIKit */,
+			);
+			name = SwiftUIUIKit;
+			productType = "com.apple.product-type.application";
+		};
+		AA0000000000000000000002 /* SwiftUIUIKitTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BB0000000000000000000002;
+			fileSystemSynchronizedGroups = (
+				CC0000000000000000000002 /* SwiftUIUIKitTests */,
+			);
+			name = SwiftUIUIKitTests;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		BB0000000000000000000001 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DD0000000000000000000001 /* Debug */,
+			);
+			defaultConfigurationName = Debug;
+		};
+		BB0000000000000000000002 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DD0000000000000000000002 /* Debug */,
+			);
+			defaultConfigurationName = Debug;
+		};
+		CC0000000000000000000001 = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SwiftUIUIKit;
+		};
+		CC0000000000000000000002 = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = SwiftUIUIKitTests;
+		};
+		DD0000000000000000000001 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = SwiftUIUIKit/SwiftUIUIKit.entitlements;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palm.SwiftUIUIKit;
+				PRODUCT_NAME = SwiftUIUIKit;
+			};
+			name = Debug;
+		};
+		DD0000000000000000000002 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.palm.SwiftUIUIKitTests;
+				PRODUCT_NAME = SwiftUIUIKitTests;
+			};
+			name = Debug;
+		};
+		EE0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			targets = (
+				AA0000000000000000000001 /* SwiftUIUIKit */,
+			);
+		};
+	};
+	rootObject = EE0000000000000000000001;
+}

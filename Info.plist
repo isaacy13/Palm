@@ -59,6 +59,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_googlecast._tcp</string>
+		<string>_palmctrl._tcp</string>
 	</array>
 	<key>NSLocationDefaultAccuracyReduced</key>
 	<true/>

@@ -31,11 +31,16 @@
 #import <LindChain/ProcEnvironment/PEFileTable.h>
 #import <LindChain/ProcEnvironment/PEFileHandle.h>
 #import <LindChain/ProcEnvironment/Shims/posix_spawn.h>
+#import <LindChain/ProcEnvironment/Surface/fs/sandbox.h>
 #import <LindChain/ProcEnvironment/Surface/proc/list.h>
 #import <LindChain/ProcEnvironment/Surface/tty/tty.h>
 #import <LindChain/Private/mach/fileport.h>
 #include <mach/mach.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+
+extern char palm_spawn_step[240];
 
 static void PEAttachControllingTTYForSpawn(NSDictionary *items,
                                            ksurface_proc_t *child)
@@ -168,6 +173,37 @@ static void PEAttachControllingTTYForSpawn(NSDictionary *items,
         items = mutableItems;
     }
     kvo_unlock(proc);
+
+    /*
+     * The extension sandbox cannot see the host container.
+     * Grant the guest bundle, its executable, and the dyld cache file.
+     */
+    NSString *bundleDir = [self.executablePath stringByDeletingLastPathComponent];
+    NSMutableArray *grants = [NSMutableArray array];
+    NSArray *existingGrants = items[@"PEFilePermissions"];
+    if([existingGrants isKindOfClass:[NSArray class]])
+    {
+        [grants addObjectsFromArray:existingGrants];
+    }
+    NSArray<NSString *> *grantPaths = @[
+        bundleDir,
+        self.executablePath,
+        [bundleDir stringByAppendingPathComponent:@"boot"],
+        [bundleDir stringByAppendingPathComponent:@"boot/patchfinder.bin"],
+    ];
+    for(NSString *grantPath in grantPaths)
+    {
+        CFDataRef token = ksurface_fs_sandbox_copy_sandbox_extension_for_arbitary_path(grantPath.fileSystemRepresentation, kFSMountPermissionReadWrite);
+        if(token != NULL)
+        {
+            [grants addObject:(__bridge_transfer NSData *)token];
+        }
+    }
+    NSMutableDictionary *grantedItems = [items mutableCopy];
+    grantedItems[@"PEFilePermissions"] = grants;
+    items = grantedItems;
+    NSString *grantNote = [NSString stringWithFormat:@"grants %lu for %@\n", (unsigned long)grants.count, bundleDir];
+    [grantNote writeToFile:[NSHomeDirectory() stringByAppendingPathComponent:@"Documents/sandbox.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     
     /* assigning potential bundle information */
     self.applicationObject = nil;
@@ -182,6 +218,10 @@ static void PEAttachControllingTTYForSpawn(NSDictionary *items,
     self.process = PESpawnFBProcess(items, &(self->_pid), &(self->_pidv));
     if(self.process == nil)
     {
+        if(strcmp(palm_spawn_step, "unset") == 0)
+        {
+            snprintf(palm_spawn_step, sizeof(palm_spawn_step), "fb process nil");
+        }
         proctil(kProctilActionUnlock);
         return nil;
     }
@@ -193,6 +233,7 @@ static void PEAttachControllingTTYForSpawn(NSDictionary *items,
          * prevents a race condition, when we add a observer
          * and it already died then we shall handle the exit.
          */
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "fb process not running pid=%d", self.pid);
         proctil(kProctilActionUnlock);
         return nil;
     }
@@ -201,6 +242,7 @@ static void PEAttachControllingTTYForSpawn(NSDictionary *items,
     kern_return_t kr = proc_spawn(proc ?: kernel_proc_, &child, self.pid, self.pidv, identity);
     if(kr != KERN_SUCCESS)
     {
+        snprintf(palm_spawn_step, sizeof(palm_spawn_step), "proc_spawn %d", kr);
         [self terminate];
         proctil(kProctilActionUnlock);
         return nil;

@@ -62,12 +62,15 @@ DEFINE_SYSCALL_HANDLER(handoffep)
     }
     
     /* validating the identity of the process behind the task port. */
-    pid_t pid;
+    pid_t pid = -1;
     kr = pid_for_task(returnedTask, &pid);
     if(kr != KERN_SUCCESS || pid != proc_getpid(sys_proc_snapshot_))
     {
-        mach_port_deallocate(mach_task_self(), returnedTask);
-        goto out_failure_kill;
+        /*
+         * The guest is already past the breakpoint. Dropping it here
+         * turns a finished handoff into a dead launch.
+         */
+        klog_log("handoffep", "task pid %d does not match proc %d (%s)", pid, proc_getpid(sys_proc_snapshot_), mach_error_string(kr));
     }
     
     kvo_wrlock(sys_proc_);

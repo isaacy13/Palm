@@ -30,6 +30,7 @@
 #include <os/lock.h>
 
 uint64_t patchcache[kDyldPtrCount];
+int palm_patchcache_status = 0;
 
 static bool g_have_ptrcache = false;
 static os_unfair_lock g_lock = OS_UNFAIR_LOCK_INIT;
@@ -55,6 +56,7 @@ bool ksurface_user_patchcache_load(void)
     int fd = open(path, O_RDONLY);
     if(fd < 0)
     {
+        palm_patchcache_status = -errno;
         os_unfair_lock_unlock(&g_lock);
         return false;
     }
@@ -72,11 +74,13 @@ bool ksurface_user_patchcache_load(void)
         {
             continue;
         }
+        palm_patchcache_status = -EIO;
         close(fd);
         os_unfair_lock_unlock(&g_lock);
         return false;
     }
     
+    palm_patchcache_status = 1;
     g_have_ptrcache = true;
     os_unfair_lock_unlock(&g_lock);
     close(fd);

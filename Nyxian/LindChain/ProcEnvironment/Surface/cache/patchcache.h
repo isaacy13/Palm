@@ -45,5 +45,6 @@ enum {
 };
 
 kern_return_t ksurface_patchcache_emit(void);
+kern_return_t ksurface_patchcache_write(const char *path);
 
 #endif /* PATCHCACHE_H */

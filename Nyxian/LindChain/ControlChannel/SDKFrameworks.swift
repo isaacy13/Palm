@@ -1,0 +1,1 @@
+../../../Tools/PalmControl/Sources/PalmControl/SDKFrameworks.swift

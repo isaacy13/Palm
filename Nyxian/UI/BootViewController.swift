@@ -1340,5 +1340,6 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = BootViewController()
         window.makeKeyAndVisible()
         self.window = window
+        PalmControlHost.shared.start()
     }
 }

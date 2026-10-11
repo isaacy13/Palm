@@ -144,14 +144,14 @@ LCMachO *LCMapMachOFromFDRO(int fd)
         goto out_fail_deallocate;
     }
     
+    /* assign before F_GETPATH; a zeroed fd would ask about stdin */
+    machO->ro = true;
+    machO->fd = fd;
+
     if(fcntl(machO->fd, F_GETPATH, machO->path) != 0)
     {
         goto out_fail_deallocate_path;
     }
-    
-    /* initially opening the machO */
-    machO->ro = true;
-    machO->fd = fd;
     
     /* getting its size and so on */
     struct stat s = {0};

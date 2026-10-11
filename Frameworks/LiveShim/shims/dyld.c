@@ -25,11 +25,16 @@
 #include <LiveShim/cdhash.h>
 #include <Frameworks/HWHook/HWHookThreadContext.h>
 #include <mach-o/dyld_images.h>
+#include <mach-o/loader.h>
 #include <sys/mman.h>
 #include <copyfile.h>
 #include <sys/clonefile.h>
 #include <copyfile.h>
 #include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <os/lock.h>
 #include <LiveShim/patchcache.h>
 #include <Broadpatch/Broadpatch.h>
@@ -66,12 +71,37 @@ static int (*orig_dyld_fstat64)(int fildes, struct stat *buf);
 static int (*orig_dyld_stat64)(const char *path, struct stat *buf);
 static int (*orig_dyld_openat)(int fd, const char *path, int flags, mode_t mode);
 
+static void palm_dyld_note(const char *line)
+{
+    const char *root = getenv("NXROOT");
+    if(root == NULL || root[0] == '\0' || line == NULL)
+    {
+        return;
+    }
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/boot/guest.txt", root);
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if(fd < 0)
+    {
+        return;
+    }
+    write(fd, line, strlen(line));
+    write(fd, "\n", 1);
+    close(fd);
+}
+
 static int hook_fcntl(int fildes,
                       int cmd,
                       void *param)
 {
     dyld_hook_log("[hook_fcntl:args] (fildes = %d, cmd: %d, param: %p)\n", fildes, cmd, param);
     int ret = orig_dyld_fcntl(fildes, cmd, param);
+    if(cmd == F_ADDFILESIGS_RETURN || cmd == F_CHECK_LV)
+    {
+        char note[80];
+        snprintf(note, sizeof(note), "fcntl %d -> %d errno %d", cmd, ret, errno);
+        palm_dyld_note(note);
+    }
     if(cmd == F_GETPATH)
     {
         dyld_hook_log("[hook_fcntl:orig_return] (ret = %d, path: %s)\n", ret, (char*)param);
@@ -109,6 +139,48 @@ static _Thread_local bool cdhash_must_valid;
 static _Thread_local bool open_hardlock;
 static _Thread_local const char *cdhash_data_container_match;
 static _Thread_local dlopen_cdhash_verifier_failed_callback_t cdhash_verifier_failed_callback;
+static void palm_trim_signature(int fd)
+{
+    struct mach_header_64 header;
+    if(pread(fd, &header, sizeof(header), 0) != (ssize_t)sizeof(header) || header.magic != MH_MAGIC_64)
+    {
+        return;
+    }
+    uint32_t size = header.sizeofcmds;
+    uint8_t *commands = malloc(size);
+    if(commands == NULL || pread(fd, commands, size, sizeof(header)) != (ssize_t)size)
+    {
+        free(commands);
+        return;
+    }
+    uint32_t offset = 0;
+    for(uint32_t index = 0; index < header.ncmds; index++)
+    {
+        struct load_command *command = (struct load_command *)(commands + offset);
+        if(command->cmdsize < sizeof(*command) || offset + command->cmdsize > size)
+        {
+            break;
+        }
+        if(command->cmd == LC_CODE_SIGNATURE && command->cmdsize >= sizeof(struct linkedit_data_command))
+        {
+            struct linkedit_data_command *signature = (struct linkedit_data_command *)command;
+            if(ftruncate(fd, (off_t)signature->dataoff + signature->datasize) == 0)
+            {
+                palm_dyld_note("trimmed signature");
+            }
+            else
+            {
+                char note[64];
+                snprintf(note, sizeof(note), "trim fail %d", errno);
+                palm_dyld_note(note);
+            }
+            break;
+        }
+        offset += command->cmdsize;
+    }
+    free(commands);
+}
+
 static int path_validation_bypass_open(int fd,
                                        int flags)
 {
@@ -122,14 +194,16 @@ static int path_validation_bypass_open(int fd,
         {
             /* need a new path */
             char newTmpPath[PATH_MAX];
+            palm_dyld_note(mmap_sandbox_map_exec_allowed_path ? mmap_sandbox_map_exec_allowed_path : "mmap path null");
             snprintf(newTmpPath, sizeof(newTmpPath),  "%s/tmp/%d/0x%llx.dylib", mmap_sandbox_map_exec_allowed_path, getpid(), inode_for_fd(fd));    /* use tmp so iOS clears it automatically in LP home */
             
             dyld_hook_log("[path_validation_bypass_open] [library validation bypass] new path: %s\n", newTmpPath);
             dyld_hook_log("[path_validation_bypass_open] [library validation bypass] dyld needs to think that %s is located at %s\n", newTmpPath, actualPath);
             
-            int copyfd = open(newTmpPath, flags);
+            int copyfd = open(newTmpPath, O_RDWR);
             if(copyfd >= 0)
             {
+                palm_trim_signature(copyfd);
                 close(fd);
                 dup2(copyfd, fd);
                 close(copyfd);
@@ -140,17 +214,21 @@ static int path_validation_bypass_open(int fd,
             dyld_hook_log("[path_validation_bypass_open] [library validation bypass] APFS CoW copy needed\n");
             if(fclonefileat(fd, AT_FDCWD, newTmpPath, 0) == 0)
             {
+                palm_dyld_note("clone ok");
                 dyld_hook_log("[path_validation_bypass_open] [library validation bypass] APFS CoW copy succeeded\n");
-                copyfd = open(newTmpPath, flags);
+                copyfd = open(newTmpPath, O_RDWR);
                 if(copyfd < 0)
                 {
                     dyld_hook_log("[path_validation_bypass_open] [library validation bypass] couldn't open file descriptor\n");
                     goto lv_bypass_setup_done;
                 }
+                palm_trim_signature(copyfd);
             }
             else
             {
-             
+                char note[64];
+                snprintf(note, sizeof(note), "clone fail %d", errno);
+                palm_dyld_note(note);
                 dyld_hook_log("[path_validation_bypass_open] [library validation bypass] APFS CoW copy failed(errno: %s), falling back to copyfile\n", strerror(errno));
                 copyfd = open(newTmpPath, O_RDWR | O_CREAT | O_TRUNC, 0777);
                 if(copyfd < 0)
@@ -166,14 +244,16 @@ static int path_validation_bypass_open(int fd,
                     dyld_hook_log("[path_validation_bypass_open] [library validation bypass] fcopyfile failed: %s\n", strerror(errno));
                     goto lv_bypass_setup_done;
                 }
+                palm_dyld_note("copyfile ok");
                 dyld_hook_log("[path_validation_bypass_open] [library validation bypass] fcopyfile succeeded\n");
                 
-                copyfd = open(newTmpPath, flags);
+                copyfd = open(newTmpPath, O_RDWR);
                 if(copyfd < 0)
                 {
                     dyld_hook_log("[path_validation_bypass_open] [library validation bypass] couldn't open file descriptor\n");
                     goto lv_bypass_setup_done;
                 }
+                palm_trim_signature(copyfd);
             }
             
             /* this to orient or selfs */
@@ -468,6 +548,9 @@ LIBKERN_PATCH(void*, dlopen, (const char *path, int mode),
     
     open_hardlock = false;
     HWHookThreadContextRef context = HWHookDlopenThreadContext();
+    char hookNote[80];
+    snprintf(hookNote, sizeof(hookNote), "dlopen hook context=%p", context);
+    palm_dyld_note(hookNote);
     HWHookThreadContextEnter(context);  /* is nil safe, so it shall work anyways */
     void *ret = dlopen__orig(path, mode);
     HWHookThreadContextExit(context);

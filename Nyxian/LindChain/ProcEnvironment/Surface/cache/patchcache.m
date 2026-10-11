@@ -243,14 +243,23 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
     /* now the shit that takes 20~30ms if not cached properly */
     const char *libdyldPath = "/usr/lib/system/libdyld.dylib";
     mach_header_u *libdyldHeader = LCGetLoadedImageHeader(0, libdyldPath);
-    assert(libdyldHeader != NULL);
+    if(libdyldHeader == NULL)
+    {
+        klog_log("patchfinder:emit", "libdyld is not loaded");
+        return KERN_FAILURE;
+    }
     void **lockUnlockPtr = NULL;
     void **vtableLibSystemHelpers = litehook_find_dsc_symbol(libdyldPath, "__ZTVN5dyld416LibSystemHelpersE");
     void *lockFunc = litehook_find_dsc_symbol(libdyldPath, "__ZNK5dyld416LibSystemHelpers42os_unfair_recursive_lock_lock_with_optionsEP26os_unfair_recursive_lock_s24os_unfair_lock_options_t");
+    if(vtableLibSystemHelpers == NULL || lockFunc == NULL)
+    {
+        klog_log("patchfinder:emit", "libdyld lock vtable is missing");
+        return KERN_FAILURE;
+    }
 #if DEBUG
     void *unlockFunc = litehook_find_dsc_symbol(libdyldPath, "__ZNK5dyld416LibSystemHelpers31os_unfair_recursive_lock_unlockEP26os_unfair_recursive_lock_s");
 #endif /* DEBUG */
-    while(!lockUnlockPtr)
+    for(int slot = 0; slot < 512 && lockUnlockPtr == NULL; slot++)
     {
         if(vtableLibSystemHelpers[0] == lockFunc)
         {
@@ -261,6 +270,11 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
             break;
         }
         vtableLibSystemHelpers++;
+    }
+    if(lockUnlockPtr == NULL)
+    {
+        klog_log("patchfinder:emit", "lock function is not in the libdyld vtable");
+        return KERN_FAILURE;
     }
     
     entries[kDyldLockUnlockFunc].found = lockUnlockPtr;
@@ -324,15 +338,22 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
                 adrpExtraOffset = cur - adrpInstPtr;
                 break;
             }
-            assert(adrpExtraOffset != -1);
+            if(adrpExtraOffset == -1)
+            {
+                klog_log("patchfinder:emit", "adrp/ldr pattern missing in %s", dyldNames[i].name);
+                break;
+            }
         }
         
         adrpInstPtr += adrpExtraOffset;
         
         void *dptr = (void*)aarch64_emulate_adrp_ldr(*adrpInstPtr, *(adrpInstPtr + 1), (uint64_t)adrpInstPtr);
         
-        assert(dptr != NULL);
-        assert(*(void**)dptr != NULL);
+        if(dptr == NULL || *(void**)dptr == NULL)
+        {
+            klog_log("patchfinder:emit", "dyld API pointer missing in %s", dyldNames[i].name);
+            break;
+        }
         void* vtablePtr = **(void***)dptr;
         
         void* vtableFunctionPtr = 0;
@@ -354,7 +375,11 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
         {
             // arm64
             uint32_t* ldrInstPtr2 = adrpInstPtr + 3;
-            assert((*ldrInstPtr2 & 0xBFC00000) == 0xB9400000);
+            if((*ldrInstPtr2 & 0xBFC00000) != 0xB9400000)
+            {
+                klog_log("patchfinder:emit", "vtable load missing in %s", dyldNames[i].name);
+                break;
+            }
             uint32_t size2 = (*ldrInstPtr2 & 0xC0000000) >> 30;
             uint32_t imm12_2 = (*ldrInstPtr2 & 0x3FFC00) >> 10;
             vtableFunctionPtr = vtablePtr + (imm12_2 << size2);
@@ -408,8 +433,13 @@ static kern_return_t findDyldFunctionPointers(uint64_t out[kDyldPtrCount])
     return KERN_SUCCESS;
 }
 
-kern_return_t ksurface_patchcache_emit(void)
+kern_return_t ksurface_patchcache_write(const char *path)
 {
+    if(path == NULL)
+    {
+        return KERN_INVALID_ARGUMENT;
+    }
+    
     uint64_t patches[kDyldPtrCount];
     kern_return_t kr = findDyldFunctionPointers(patches);
     if(kr != KERN_SUCCESS)
@@ -423,13 +453,22 @@ kern_return_t ksurface_patchcache_emit(void)
         return KERN_RESOURCE_SHORTAGE;
     }
     
-    NSURL *url = [NXBootstrap.shared.rootURL URLByAppendingPathComponent:@"mntfs/bootfs/patchfinder.bin"];
     NSError *error = nil;
-    if(![data writeToURL:url options:NSDataWritingAtomic error:&error])
+    if(![data writeToFile:[NSString stringWithUTF8String:path] options:NSDataWritingAtomic error:&error])
     {
         klog_log("patchfinder:emit", "couldn't write dyld.ptrs: %@", error);
         return KERN_FAILURE;
     }
     
     return KERN_SUCCESS;
+}
+
+kern_return_t ksurface_patchcache_emit(void)
+{
+    NSURL *url = [NXBootstrap.shared.rootURL URLByAppendingPathComponent:@"mntfs/bootfs/patchfinder.bin"];
+    if(url.path == nil)
+    {
+        return KERN_FAILURE;
+    }
+    return ksurface_patchcache_write(url.path.UTF8String);
 }

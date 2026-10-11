@@ -41,12 +41,12 @@ static dispatch_source_t global_signal_source = nil;
 - (void)hook_run
 {
     /* tell host app to let our process appear as a window */
-    liveshim_syscall(SYS_pectl, kPECTLCategoryUserInterface, kPECTLUserInterfaceInit, NULL, NULL, MACH_PORT_NULL);
+    liveshim_syscall(SYS_pectl, kPECTLCategoryUserInterface, kPECTLUserInterfaceInit, 0, 0, MACH_PORT_NULL, NULL);
     
     while(errno == EAGAIN)
     {
         usleep(500);
-        liveshim_syscall(SYS_pectl, kPECTLCategoryUserInterface, kPECTLUserInterfaceInit, NULL, NULL, MACH_PORT_NULL);
+        liveshim_syscall(SYS_pectl, kPECTLCategoryUserInterface, kPECTLUserInterfaceInit, 0, 0, MACH_PORT_NULL, NULL);
     }
     
     [self hook_run];

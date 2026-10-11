@@ -35,4 +35,6 @@
 
 #import <LindChain/ProcEnvironment/Surface/trust/signing.h>
 
+#import <LindChain/PalmHost/PalmLaunch.h>
+
 #endif /* BOOTBRIDGE_H */
