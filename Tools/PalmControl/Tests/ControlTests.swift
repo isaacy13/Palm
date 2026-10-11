@@ -116,6 +116,14 @@ final class ControlTests: XCTestCase {
         let project = URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI.xcodeproj")
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.path))
         let context = try makeContext()
+        let cross = context.sdkRoot.appendingPathComponent("System/Library/Frameworks/MapKit.framework/Modules/MapKit.swiftcrossimport")
+        try FileManager.default.createDirectory(at: cross, withIntermediateDirectories: true)
+        try """
+        ---
+        version: 1
+        modules:
+          - name: _MapKit_SwiftUI
+        """.write(to: cross.appendingPathComponent("SwiftUI.swiftoverlay"), atomically: true, encoding: .utf8)
         let driver = ProjectDriver()
         let build = try driver.plan(project: project, target: "GuideAI", kind: .build, tests: ["Ignored"], context: context)
         XCTAssertEqual(build.bundleIdentifier, "com.onexengineering.GuideAI")
@@ -194,6 +202,10 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(build.compileJobs.contains { job in
             job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("EpoxyCore/Model/EpoxyModeled.swift") }
         })
+        let navigation = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("NavigationState") }
+        XCTAssertTrue(navigation?.contains("CrossImports") == true)
+        let navigationText = try String(contentsOfFile: try XCTUnwrap(navigation))
+        XCTAssertTrue(navigationText.hasPrefix("import _MapKit_SwiftUI\n"))
         XCTAssertTrue(build.compileJobs.contains { $0.tool == "swiftc" && $0.arguments.contains("1000000") })
         let moduleOrder = build.compileJobs.map(\.moduleName)
         if let promises = moduleOrder.firstIndex(of: "Promises"), let sessions = moduleOrder.firstIndex(of: "FirebaseSessions") {

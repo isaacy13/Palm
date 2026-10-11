@@ -179,7 +179,7 @@ public struct ProjectDriver {
             if !package.sources.isEmpty {
                 let job = swiftJob(
                     moduleName: package.name,
-                    sources: try sourcesWithResourceBundle(try sourcesWithoutPreviews(package.sources, context: context), moduleName: sanitizedModule(package.name), context: context),
+                    sources: try sourcesWithResourceBundle(try sourcesWithCrossImports(try sourcesWithoutPreviews(package.sources, context: context), sdkRoot: context.sdkRoot, context: context), moduleName: sanitizedModule(package.name), context: context),
                     frameworks: linked,
                     deployment: deployment,
                     context: context,
@@ -217,7 +217,7 @@ public struct ProjectDriver {
         if !sources.swift.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name),
-                sources: try sourcesWithoutPreviews(sources.swift, context: context),
+                sources: try sourcesWithCrossImports(try sourcesWithoutPreviews(sources.swift, context: context), sdkRoot: context.sdkRoot, context: context),
                 frameworks: linked,
                 deployment: deployment,
                 context: context,
@@ -241,7 +241,7 @@ public struct ProjectDriver {
         if includeTests && !testSources.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name) + "Tests",
-                sources: testSources,
+                sources: try sourcesWithCrossImports(testSources, sdkRoot: context.sdkRoot, context: context),
                 frameworks: linked,
                 deployment: deployment,
                 context: context,
@@ -475,6 +475,85 @@ private func sourcesWithResourceBundle(_ sources: [URL], moduleName: String, con
     """
     try accessor.write(to: file, atomically: true, encoding: .utf8)
     return sources + [file]
+}
+
+private struct CrossImportOverlay {
+    var declaring: String
+    var bystander: String
+    var modules: [String]
+}
+
+/// Swift loads `MapKit.swiftcrossimport/SwiftUI.swiftoverlay` when a file imports
+/// both modules. The on-device compiler does not, so files that import both
+/// sides get an explicit `import` of the overlay module.
+private func crossImportOverlays(sdkRoot: URL) -> [CrossImportOverlay] {
+    var overlays: [CrossImportOverlay] = []
+    let frameworks = sdkRoot.appendingPathComponent("System/Library/Frameworks")
+    if let names = try? FileManager.default.contentsOfDirectory(at: frameworks, includingPropertiesForKeys: nil) {
+        for framework in names where framework.pathExtension == "framework" {
+            collectCrossImports(in: framework.appendingPathComponent("Modules"), into: &overlays)
+        }
+    }
+    collectCrossImports(in: sdkRoot.appendingPathComponent("usr/include"), into: &overlays)
+    return overlays
+}
+
+private func collectCrossImports(in directory: URL, into overlays: inout [CrossImportOverlay]) {
+    guard let children = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+    for child in children where child.lastPathComponent.hasSuffix(".swiftcrossimport") {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: child, includingPropertiesForKeys: nil) else { continue }
+        let suffix = ".swiftcrossimport"
+        let declaring = String(child.lastPathComponent.dropLast(suffix.count))
+        for file in files where file.pathExtension == "swiftoverlay" {
+            let modules = overlayModuleNames(in: file)
+            guard !modules.isEmpty else { continue }
+            overlays.append(CrossImportOverlay(
+                declaring: declaring,
+                bystander: file.deletingPathExtension().lastPathComponent,
+                modules: modules
+            ))
+        }
+    }
+}
+
+private func overlayModuleNames(in url: URL) -> [String] {
+    guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+    var names: [String] = []
+    for line in text.split(separator: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let range = trimmed.range(of: "name:") else { continue }
+        let name = trimmed[range.upperBound...].trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { names.append(String(name)) }
+    }
+    return names
+}
+
+private func sourcesWithCrossImports(_ sources: [URL], sdkRoot: URL, context: DriverContext) throws -> [URL] {
+    let overlays = crossImportOverlays(sdkRoot: sdkRoot)
+    guard !overlays.isEmpty else { return sources }
+    var rewritten: [URL] = []
+    let directory = context.workRoot.appendingPathComponent("CrossImports")
+    for source in sources {
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            rewritten.append(source)
+            continue
+        }
+        let imported = imports(in: [source])
+        let extra = overlays
+            .filter { imported.contains($0.declaring) && imported.contains($0.bystander) }
+            .flatMap(\.modules)
+            .filter { !imported.contains($0) }
+        guard !extra.isEmpty else {
+            rewritten.append(source)
+            continue
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dest = directory.appendingPathComponent(source.path.replacingOccurrences(of: "/", with: "_"))
+        let header = extra.map { "import \($0)\n" }.joined()
+        try (header + text).write(to: dest, atomically: true, encoding: .utf8)
+        rewritten.append(dest)
+    }
+    return rewritten
 }
 
 private func sourcesWithoutPreviews(_ sources: [URL], context: DriverContext) throws -> [URL] {
