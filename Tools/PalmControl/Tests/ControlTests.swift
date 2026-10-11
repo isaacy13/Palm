@@ -201,6 +201,7 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(guideArguments.contains("-default-isolation"))
         XCTAssertTrue(guideArguments.contains("MainActor"))
         XCTAssertTrue(guideArguments.contains("MemberImportVisibility"))
+        XCTAssertTrue(guideArguments.contains { $0.hasSuffix("host/plugins") })
         XCTAssertTrue(build.compileJobs.contains { job in
             job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("EpoxyCore/Views/ViewType.swift") }
         })

@@ -310,6 +310,7 @@ public struct ProjectDriver {
             "-Xllvm", "-aarch64-use-tbi",
             "-sdk", context.sdkRoot.path,
             "-resource-dir", context.swiftResourceDir.path,
+            "-plugin-path", context.swiftResourceDir.appendingPathComponent("host/plugins").path,
             "-module-cache-path", context.moduleCache.path,
             "-Xfrontend", "-enable-objc-interop",
             "-parse-as-library",
