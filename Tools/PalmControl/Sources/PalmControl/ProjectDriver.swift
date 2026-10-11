@@ -218,7 +218,7 @@ public struct ProjectDriver {
         if !sources.swift.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name),
-                sources: try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutPreviews(sources.swift, context: context), context: context), sdkRoot: context.sdkRoot, context: context),
+                sources: try sourcesWithoutBindingMethodSetters(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutPreviews(sources.swift, context: context), context: context), sdkRoot: context.sdkRoot, context: context), context: context),
                 frameworks: linked,
                 deployment: deployment,
                 context: context,
@@ -518,7 +518,28 @@ private func sourceFiles(for target: [String: PbxValue], objects: [String: PbxVa
         let root = projectDirectory.appendingPathComponent(path)
         collectSources(at: root, swift: &swift, clang: &clang)
     }
+    appendExplicitSources(of: target, objects: objects, projectDirectory: projectDirectory, swift: &swift, clang: &clang)
     return TargetSources(swift: swift.sorted { $0.path < $1.path }, clang: clang.sorted { $0.path < $1.path }, frameworksFromSettings: [])
+}
+
+/// Synchronized folders miss files that are only listed on the target's Sources phase.
+private func appendExplicitSources(of target: [String: PbxValue], objects: [String: PbxValue], projectDirectory: URL, swift: inout [URL], clang: inout [URL]) {
+    let phaseIDs = target["buildPhases"]?.array?.compactMap(\.string) ?? []
+    for id in phaseIDs {
+        guard let phase = objects[id]?.object, phase["isa"]?.string == "PBXSourcesBuildPhase" else { continue }
+        for fileID in phase["files"]?.array?.compactMap(\.string) ?? [] {
+            guard let buildFile = objects[fileID]?.object,
+                  let refID = buildFile["fileRef"]?.string,
+                  let ref = objects[refID]?.object,
+                  let path = ref["path"]?.string else { continue }
+            let url = projectDirectory.appendingPathComponent(path)
+            if path.hasSuffix(".swift") {
+                if !swift.contains(where: { $0.path == url.path }) { swift.append(url) }
+            } else if ["m", "c", "mm", "cc", "cpp"].contains(url.pathExtension) {
+                if !clang.contains(where: { $0.path == url.path }) { clang.append(url) }
+            }
+        }
+    }
 }
 
 private func sourcesWithResourceBundle(_ sources: [URL], moduleName: String, context: DriverContext) throws -> [URL] {
@@ -595,6 +616,44 @@ private func overlayModuleNames(in url: URL) -> [String] {
         if !name.isEmpty { names.append(String(name)) }
     }
     return names
+}
+
+/// Swift 6.3.3 aborts in IRGen when a MainActor method is passed straight to
+/// `Binding`'s setter. A closure call at that site compiles.
+private func sourcesWithoutBindingMethodSetters(_ sources: [URL], context: DriverContext) throws -> [URL] {
+    var rewritten: [URL] = []
+    let directory = context.workRoot.appendingPathComponent("BindingSetters")
+    for source in sources {
+        guard let text = try? String(contentsOf: source, encoding: .utf8) else {
+            rewritten.append(source)
+            continue
+        }
+        let updated = expandBindingMethodSetters(text)
+        guard updated != text else {
+            rewritten.append(source)
+            continue
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dest = directory.appendingPathComponent(shortSourceName(source))
+        try updated.write(to: dest, atomically: true, encoding: .utf8)
+        rewritten.append(dest)
+    }
+    return rewritten
+}
+
+private func expandBindingMethodSetters(_ text: String) -> String {
+    text.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+        let raw = String(line)
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("set:") else { return raw }
+        var rest = trimmed.dropFirst("set:".count).trimmingCharacters(in: .whitespaces)
+        let comma = rest.hasSuffix(",")
+        if comma { rest = rest.dropLast().trimmingCharacters(in: .whitespaces) }
+        guard !rest.isEmpty, !rest.contains("{"), !rest.contains("("), !rest.contains("."), !rest.contains(" ") else { return raw }
+        guard rest.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return raw }
+        let indent = String(raw.prefix { $0 == " " || $0 == "\t" })
+        return "\(indent)set: { \(rest)($0) }\(comma ? "," : "")"
+    }.joined(separator: "\n")
 }
 
 private func sourcesWithCrossImports(_ sources: [URL], sdkRoot: URL, context: DriverContext) throws -> [URL] {

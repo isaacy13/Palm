@@ -214,6 +214,14 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(navigation?.contains("CrossImports") == true)
         let navigationText = try String(contentsOfFile: try XCTUnwrap(navigation))
         XCTAssertTrue(navigationText.hasPrefix("import _MapKit_SwiftUI\n"))
+        let firstRun = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("FirstRunSetupView") }
+        XCTAssertTrue(firstRun?.contains("BindingSetters") == true)
+        let firstRunText = try String(contentsOfFile: try XCTUnwrap(firstRun))
+        XCTAssertTrue(firstRunText.contains("set: { applyPagerSelectionFromSwipe($0) }"))
+        XCTAssertFalse(firstRunText.contains("set: applyPagerSelectionFromSwipe\n"))
+        XCTAssertTrue(build.compileJobs.contains { job in
+            job.moduleName == "GuideAI" && job.sources.contains { $0.hasSuffix("HealthLungCycleArtwork.swift") }
+        })
         let mapUtilities = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("MapUtilities") }
         XCTAssertTrue(mapUtilities?.contains("CrossImports") == true)
         let mapUtilitiesText = try String(contentsOfFile: try XCTUnwrap(mapUtilities))

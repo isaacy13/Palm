@@ -40,6 +40,8 @@ final class NyxianToolchain: DeviceToolchain {
                     continue
                 }
                 log.append("run \(item.type.rawValue) \(item.arguments.joined(separator: " "))")
+                let primary = frontendPrimary(item.arguments)
+                NSLog("palm run %@ %@ %@", "\(item.type.rawValue)", job.moduleName, primary)
                 try execute(item, log: log, stage: "compile")
             }
         }
@@ -188,6 +190,15 @@ final class NyxianToolchain: DeviceToolchain {
             throw ControlError.signFailed("sign failed (\(status)) for \(path)")
         }
         log.append("signed \(path)")
+    }
+
+    private func frontendPrimary(_ arguments: [String]) -> String {
+        for flag in ["-primary-file", "-o"] {
+            if let index = arguments.firstIndex(of: flag), index + 1 < arguments.count {
+                return (arguments[index + 1] as NSString).lastPathComponent
+            }
+        }
+        return ""
     }
 
     private func execute(_ job: MDKJob, log: ControlLog, stage: String) throws {
