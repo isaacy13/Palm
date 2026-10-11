@@ -226,7 +226,8 @@ public struct ProjectDriver {
                 headerSearchPaths: packages.filter { !$0.isTest }.flatMap(\.headerPaths),
                 emitModule: false,
                 output: appOutput,
-                moduleMaps: moduleMaps
+                moduleMaps: moduleMaps,
+                extraArguments: swiftLanguageArguments(from: settings)
             ))
         }
         if !sources.clang.isEmpty {
@@ -249,7 +250,8 @@ public struct ProjectDriver {
                 frameworkSearchPaths: moduleSearchPaths,
                 emitModule: false,
                 output: testExecutable,
-                moduleMaps: moduleMaps
+                moduleMaps: moduleMaps,
+                extraArguments: swiftLanguageArguments(from: settings)
             ))
         }
 
@@ -298,7 +300,8 @@ public struct ProjectDriver {
                           output: String?,
                           moduleMaps: [String] = [],
                           swiftPackage: Bool = false,
-                          swiftVersion: String = "6") -> CompilerJob {
+                          swiftVersion: String = "6",
+                          extraArguments: [String] = []) -> CompilerJob {
         let compiledName = sanitizedModule(moduleName)
         var arguments = [
             "-module-name", compiledName,
@@ -315,6 +318,7 @@ public struct ProjectDriver {
         if swiftVersion == "6" {
             arguments.append(contentsOf: ["-enable-upcoming-feature", "InferIsolatedConformances"])
         }
+        arguments.append(contentsOf: extraArguments)
         if swiftPackage {
             arguments.append(contentsOf: ["-D", "SWIFT_PACKAGE"])
         }
@@ -421,6 +425,26 @@ private func nativeTarget(named name: String, objects: [String: PbxValue]) -> [S
         return object
     }
     return nil
+}
+
+private func swiftLanguageArguments(from settings: [String: String]) -> [String] {
+    var arguments: [String] = []
+    if let isolation = settings["SWIFT_DEFAULT_ACTOR_ISOLATION"], !isolation.isEmpty, isolation != "nonisolated" {
+        arguments.append(contentsOf: ["-default-isolation", isolation])
+    }
+    if settings["SWIFT_APPROACHABLE_CONCURRENCY"] == "YES" {
+        for feature in ["NonisolatedNonsendingByDefault", "InferIsolatedConformances", "InferSendableFromCaptures"] {
+            arguments.append(contentsOf: ["-enable-upcoming-feature", feature])
+        }
+    }
+    for (key, value) in settings where key.hasPrefix("SWIFT_UPCOMING_FEATURE_") && value == "YES" {
+        let feature = key.dropFirst("SWIFT_UPCOMING_FEATURE_".count).split(separator: "_").map { part in
+            part.prefix(1).uppercased() + part.dropFirst().lowercased()
+        }.joined()
+        guard !feature.isEmpty else { continue }
+        arguments.append(contentsOf: ["-enable-upcoming-feature", feature])
+    }
+    return arguments
 }
 
 private func buildSettings(for target: [String: PbxValue], objects: [String: PbxValue]) -> [String: String] {

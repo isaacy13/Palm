@@ -193,6 +193,10 @@ final class ControlTests: XCTestCase {
         })
         XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.sources.contains { $0.contains("ExperimentalFlags.swift") } }), "5")
         XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.moduleName == "Toasts" }), "6")
+        let guideArguments = build.compileJobs.first { $0.moduleName == "GuideAI" }?.arguments ?? []
+        XCTAssertTrue(guideArguments.contains("-default-isolation"))
+        XCTAssertTrue(guideArguments.contains("MainActor"))
+        XCTAssertTrue(guideArguments.contains("MemberImportVisibility"))
         XCTAssertTrue(build.compileJobs.contains { job in
             job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("EpoxyCore/Views/ViewType.swift") }
         })
