@@ -548,12 +548,21 @@ private func sourcesWithCrossImports(_ sources: [URL], sdkRoot: URL, context: Dr
             continue
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let dest = directory.appendingPathComponent(source.path.replacingOccurrences(of: "/", with: "_"))
+        let dest = directory.appendingPathComponent(shortSourceName(source))
         let header = extra.map { "import \($0)\n" }.joined()
         try (header + text).write(to: dest, atomically: true, encoding: .utf8)
         rewritten.append(dest)
     }
     return rewritten
+}
+
+private func shortSourceName(_ source: URL) -> String {
+    var hash: UInt64 = 1469598103934665603
+    for byte in source.path.utf8 {
+        hash ^= UInt64(byte)
+        hash &*= 1099511628211
+    }
+    return String(format: "%016llx", hash) + "-" + source.lastPathComponent
 }
 
 private func sourcesWithoutPreviews(_ sources: [URL], context: DriverContext) throws -> [URL] {
