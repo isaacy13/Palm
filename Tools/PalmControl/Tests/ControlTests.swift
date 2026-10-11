@@ -183,6 +183,8 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(build.compileJobs.contains { job in
             job.moduleName == "EmojiKit" && job.sources.contains { $0.contains("ResourceAccessors/EmojiKit.swift") }
         })
+        XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.sources.contains { $0.contains("ExperimentalFlags.swift") } }), "5")
+        XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.moduleName == "Toasts" }), "6")
         let moduleOrder = build.compileJobs.map(\.moduleName)
         if let promises = moduleOrder.firstIndex(of: "Promises"), let sessions = moduleOrder.firstIndex(of: "FirebaseSessions") {
             XCTAssertLessThan(promises, sessions)
@@ -255,6 +257,11 @@ private final class RecordingToolchain: DeviceToolchain {
         calls.append("test")
         log.append("ran \(names.joined(separator: " ")) in \(process.pid)")
     }
+}
+
+private func swiftLanguageMode(_ job: CompilerJob?) -> String? {
+    guard let job, let index = job.arguments.firstIndex(of: "-swift-version"), index + 1 < job.arguments.count else { return nil }
+    return job.arguments[index + 1]
 }
 
 private func fixtureRoot() -> URL {

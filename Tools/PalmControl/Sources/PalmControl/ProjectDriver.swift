@@ -189,7 +189,8 @@ public struct ProjectDriver {
                     emitModule: true,
                     output: nil,
                     moduleMaps: moduleMaps,
-                    swiftPackage: true
+                    swiftPackage: true,
+                    swiftVersion: package.swiftVersion
                 )
                 compileJobs.append(job)
                 packageObjects.append(context.workRoot.appendingPathComponent("\(package.name).o").path)
@@ -296,7 +297,8 @@ public struct ProjectDriver {
                           emitModule: Bool,
                           output: String?,
                           moduleMaps: [String] = [],
-                          swiftPackage: Bool = false) -> CompilerJob {
+                          swiftPackage: Bool = false,
+                          swiftVersion: String = "6") -> CompilerJob {
         let compiledName = sanitizedModule(moduleName)
         var arguments = [
             "-module-name", compiledName,
@@ -307,9 +309,11 @@ public struct ProjectDriver {
             "-module-cache-path", context.moduleCache.path,
             "-Xfrontend", "-enable-objc-interop",
             "-parse-as-library",
-            "-swift-version", "6",
-            "-enable-upcoming-feature", "InferIsolatedConformances",
+            "-swift-version", swiftVersion,
         ]
+        if swiftVersion == "6" {
+            arguments.append(contentsOf: ["-enable-upcoming-feature", "InferIsolatedConformances"])
+        }
         if swiftPackage {
             arguments.append(contentsOf: ["-D", "SWIFT_PACKAGE"])
         }
@@ -399,6 +403,7 @@ private struct PackageUnit {
     var dependencies: [String]
     var defines: [String]
     var isTest: Bool
+    var swiftVersion: String
 }
 
 private struct TargetSources {
@@ -588,6 +593,8 @@ private func packageUnits(for target: [String: PbxValue], objects: [String: PbxV
         seen.insert(name)
         seen.insert(found.declaration.name)
         var unit = makePackageUnit(found.declaration, packageRoot: found.root)
+        let toolsMajor = loaded.first { $0.root.path == found.root.path }?.manifest.toolsMajor ?? 5
+        unit.swiftVersion = toolsMajor >= 6 ? "6" : "5"
         unit.dependencies = found.declaration.dependencies.compactMap { dependency in
             resolvePackageTarget(named: dependency, loaded: loaded)?.declaration.name
         }
@@ -708,7 +715,8 @@ private func makePackageUnit(_ declaration: PackageDeclaration, packageRoot: URL
         publicHeaders: publicHeaders,
         dependencies: declaration.dependencies,
         defines: declaration.defines,
-        isTest: declaration.isTest
+        isTest: declaration.isTest,
+        swiftVersion: "5"
     )
 }
 
@@ -884,6 +892,7 @@ private struct PackageDeclaration {
 private struct PackageManifest {
     var declarations: [PackageDeclaration]
     var products: [String: String]
+    var toolsMajor: Int
 }
 
 private func packageManifest(in text: String) -> PackageManifest {
@@ -913,7 +922,8 @@ private func packageManifest(in text: String) -> PackageManifest {
         }
         index += 1
     }
-    return PackageManifest(declarations: declarations, products: products)
+    let toolsMajor = Int(firstMatch(#"swift-tools-version:\s*([0-9]+)"#, in: text) ?? "") ?? 5
+    return PackageManifest(declarations: declarations, products: products, toolsMajor: toolsMajor)
 }
 
 private func targetBlock(_ lines: [String], from index: Int) -> [String] {
