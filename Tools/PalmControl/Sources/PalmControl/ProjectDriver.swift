@@ -309,6 +309,7 @@ public struct ProjectDriver {
             "-module-cache-path", context.moduleCache.path,
             "-Xfrontend", "-enable-objc-interop",
             "-parse-as-library",
+            "-driver-filelist-threshold", "1000000",
             "-swift-version", swiftVersion,
         ]
         if swiftVersion == "6" {
