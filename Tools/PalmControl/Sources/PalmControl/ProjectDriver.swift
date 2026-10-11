@@ -179,7 +179,7 @@ public struct ProjectDriver {
             if !package.sources.isEmpty {
                 let job = swiftJob(
                     moduleName: package.name,
-                    sources: try sourcesWithResourceBundle(try sourcesWithCrossImports(try sourcesWithoutPreviews(package.sources, context: context), sdkRoot: context.sdkRoot, context: context), moduleName: sanitizedModule(package.name), context: context),
+                    sources: try sourcesWithResourceBundle(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutPreviews(package.sources, context: context), context: context), sdkRoot: context.sdkRoot, context: context), moduleName: sanitizedModule(package.name), context: context),
                     frameworks: linked,
                     deployment: deployment,
                     context: context,
@@ -217,7 +217,7 @@ public struct ProjectDriver {
         if !sources.swift.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name),
-                sources: try sourcesWithCrossImports(try sourcesWithoutPreviews(sources.swift, context: context), sdkRoot: context.sdkRoot, context: context),
+                sources: try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutPreviews(sources.swift, context: context), context: context), sdkRoot: context.sdkRoot, context: context),
                 frameworks: linked,
                 deployment: deployment,
                 context: context,
@@ -242,7 +242,7 @@ public struct ProjectDriver {
         if includeTests && !testSources.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name) + "Tests",
-                sources: try sourcesWithCrossImports(testSources, sdkRoot: context.sdkRoot, context: context),
+                sources: try sourcesWithCrossImports(try sourcesWithoutEntryMacros(testSources, context: context), sdkRoot: context.sdkRoot, context: context),
                 frameworks: linked,
                 deployment: deployment,
                 context: context,
@@ -578,6 +578,111 @@ private func sourcesWithCrossImports(_ sources: [URL], sdkRoot: URL, context: Dr
         rewritten.append(dest)
     }
     return rewritten
+}
+
+private let entryKeyProtocols = [
+    "EnvironmentValues": "EnvironmentKey",
+    "Transaction": "TransactionKey",
+    "ContainerValues": "ContainerValueKey",
+    "FocusedValues": "FocusedValueKey",
+]
+
+/// `@Entry` is implemented by the SwiftUIMacros plugin. That plugin is a Mac
+/// compiler binary, so the on-device compiler cannot load it. Expand the
+/// property into the key type the macro would have emitted.
+private func sourcesWithoutEntryMacros(_ sources: [URL], context: DriverContext) throws -> [URL] {
+    var rewritten: [URL] = []
+    let directory = context.workRoot.appendingPathComponent("EntryExpanded")
+    for source in sources {
+        guard let text = try? String(contentsOf: source, encoding: .utf8), text.contains("@Entry") else {
+            rewritten.append(source)
+            continue
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dest = directory.appendingPathComponent(shortSourceName(source))
+        try expandEntryMacros(text).write(to: dest, atomically: true, encoding: .utf8)
+        rewritten.append(dest)
+    }
+    return rewritten
+}
+
+private func expandEntryMacros(_ text: String) -> String {
+    let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    var depth = 0
+    struct Frame { var bodyDepth: Int; var key: String }
+    var frames: [Frame] = []
+    var pendingKey: String?
+    var result: [String] = []
+    var keysAtDepth: [Int: [String]] = [:]
+    for line in lines {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if pendingKey == nil, let name = entryExtensionName(trimmed), let key = entryKeyProtocols[name] {
+            pendingKey = key
+        }
+        if let key = pendingKey, line.contains("{") {
+            frames.append(Frame(bodyDepth: depth + 1, key: key))
+            pendingKey = nil
+        }
+        if let entry = entryProperty(trimmed), let frame = frames.last, depth == frame.bodyDepth {
+            let indent = String(line.prefix { $0 == " " || $0 == "\t" })
+            let keyType = "__Key_\(entry.name)"
+            result.append("""
+            \(indent)var \(entry.name): \(entry.type) {
+            \(indent)    get { self[\(keyType).self] }
+            \(indent)    set { self[\(keyType).self] = newValue }
+            \(indent)}
+            """)
+            keysAtDepth[frame.bodyDepth - 1, default: []].append("""
+            private struct \(keyType): \(frame.key) {
+                static let defaultValue: \(entry.type) = \(entry.defaultValue)
+            }
+            """)
+        } else {
+            result.append(line)
+        }
+        let delta = line.reduce(0) { count, character in
+            if character == "{" { return count + 1 }
+            if character == "}" { return count - 1 }
+            return count
+        }
+        let newDepth = depth + delta
+        if newDepth < depth {
+            var closed = depth
+            while closed > newDepth {
+                closed -= 1
+                if let structs = keysAtDepth.removeValue(forKey: closed) {
+                    result.append(contentsOf: structs)
+                }
+            }
+            frames.removeAll { $0.bodyDepth > newDepth }
+        }
+        depth = newDepth
+    }
+    return result.joined(separator: "\n")
+}
+
+private func entryExtensionName(_ line: String) -> String? {
+    guard line.hasPrefix("extension ") else { return nil }
+    var name = line.dropFirst("extension ".count)
+    if let brace = name.firstIndex(of: "{") { name = name[..<brace] }
+    if let colon = name.firstIndex(of: ":") { name = name[..<colon] }
+    let trimmed = name.trimmingCharacters(in: .whitespaces)
+    return trimmed.split(separator: ".").last.map(String.init)
+}
+
+private func entryProperty(_ line: String) -> (name: String, type: String, defaultValue: String)? {
+    guard line.hasPrefix("@Entry") else { return nil }
+    let rest = line.dropFirst("@Entry".count).trimmingCharacters(in: .whitespaces)
+    guard rest.hasPrefix("var ") else { return nil }
+    let declaration = rest.dropFirst("var ".count)
+    guard let colon = declaration.firstIndex(of: ":"),
+          let equals = declaration.firstIndex(of: "="),
+          colon < equals else { return nil }
+    let name = declaration[..<colon].trimmingCharacters(in: .whitespaces)
+    let type = declaration[declaration.index(after: colon)..<equals].trimmingCharacters(in: .whitespaces)
+    let value = declaration[declaration.index(after: equals)...].trimmingCharacters(in: .whitespaces)
+    guard !name.isEmpty, !type.isEmpty, !value.isEmpty else { return nil }
+    return (String(name), type, value)
 }
 
 private func shortSourceName(_ source: URL) -> String {

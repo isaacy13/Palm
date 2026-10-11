@@ -210,6 +210,12 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(navigation?.contains("CrossImports") == true)
         let navigationText = try String(contentsOfFile: try XCTUnwrap(navigation))
         XCTAssertTrue(navigationText.hasPrefix("import _MapKit_SwiftUI\n"))
+        let charts = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("WeatherChartsView") }
+        XCTAssertTrue(charts?.contains("EntryExpanded") == true)
+        let chartsText = try String(contentsOfFile: try XCTUnwrap(charts))
+        XCTAssertFalse(chartsText.contains("@Entry"))
+        XCTAssertTrue(chartsText.contains("struct __Key_weatherChartEmbedded: EnvironmentKey"))
+        XCTAssertTrue(chartsText.contains("struct __Key_weatherChartPlotHeight: EnvironmentKey"))
         XCTAssertTrue(build.compileJobs.contains { $0.tool == "swiftc" && $0.arguments.contains("1000000") })
         let moduleOrder = build.compileJobs.map(\.moduleName)
         if let promises = moduleOrder.firstIndex(of: "Promises"), let sessions = moduleOrder.firstIndex(of: "FirebaseSessions") {
