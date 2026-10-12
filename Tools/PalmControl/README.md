@@ -83,7 +83,9 @@ export AGENT_DEVICE_IOS_BUNDLE_ID=com.example.agentdevice.runner
 
 Repeat `--test`, or pass comma-separated names (`--test One,Two`), to compile only those test-target files. The name is the filename with or without the extension. Omit `--test` and the phone compiles every test file. Do not omit it unless you mean that.
 
-GuideAI unit tests that `@testable import GuideAI` do not compile as the on-device test binary. A name that matches no test file, together with `--ui`, skips that binary and still runs the Mac checks against the launch.
+GuideAI Swift Testing files (`import Testing` and `@testable import GuideAI`) need two modules on the test `swiftc` command. `Testing.swiftmodule` is the arm64 iOS interface from Xcode's `iPhoneOS.platform/.../Testing.framework`, staged into `Documents/swift/iphoneos` (the resource dir the test job already uses). The test job passes `-I` to that `iphoneos` directory. The app compile, only when the plan includes tests, keeps `-o` on the app executable and adds `-emit-executable -enable-testing -emit-module -emit-module-path` so `Cache/Palm/GuideAI.swiftmodule` is written. The test job searches that work directory with `-I`. This does not copy the macOS-only SwiftUIMacros plugin. A phone run of this path has not been confirmed.
+
+A name that matches no test file, together with `--ui`, skips that binary and still runs the Mac checks against the launch.
 
 The guest window is hosted inside PalmHost. `PALM_HOST_BUNDLE_ID=com.onexengineering.PalmHost` makes the Mac check open PalmHost. Opening the guest bundle id foregrounds the real SpringBoard app with the same id.
 

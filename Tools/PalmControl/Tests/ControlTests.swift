@@ -656,6 +656,61 @@ final class ControlTests: XCTestCase {
         XCTAssertGreaterThan(tested.testSources.count, 2)
     }
 
+    func testSwiftTestingPlanFindsTestingAndAppModule() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("palm-testing-plan-\(UUID().uuidString)")
+        let projectDir = root.appendingPathComponent("App")
+        let xcodeproj = projectDir.appendingPathComponent("App.xcodeproj")
+        try FileManager.default.createDirectory(at: xcodeproj, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: projectDir.appendingPathComponent("App"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: projectDir.appendingPathComponent("AppTests"), withIntermediateDirectories: true)
+        try """
+        import Foundation
+        struct PartyState {
+            static let minimumSpotsForVoting = 2
+        }
+        """.write(to: projectDir.appendingPathComponent("App/App.swift"), atomically: true, encoding: .utf8)
+        try """
+        import Foundation
+        import Testing
+        @testable import App
+        """.write(to: projectDir.appendingPathComponent("AppTests/PartyMinimumSpotsForVotingExactEdgeTests.swift"), atomically: true, encoding: .utf8)
+        try fixtureProject().write(to: xcodeproj.appendingPathComponent("project.pbxproj"), atomically: true, encoding: .utf8)
+        let context = try makeContext()
+        let driver = ProjectDriver()
+        let built = try driver.plan(project: xcodeproj, target: "App", kind: .build, tests: ["PartyMinimumSpotsForVotingExactEdgeTests"], context: context)
+        let builtApp = try XCTUnwrap(built.compileJobs.first { $0.moduleName == "App" })
+        XCTAssertFalse(builtApp.arguments.contains("-enable-testing"))
+        XCTAssertFalse(builtApp.arguments.contains("-emit-module"))
+
+        let plan = try driver.plan(
+            project: xcodeproj,
+            target: "App",
+            kind: .buildRunAndTests,
+            tests: ["PartyMinimumSpotsForVotingExactEdgeTests"],
+            context: context
+        )
+        let appJob = try XCTUnwrap(plan.compileJobs.first { $0.moduleName == "App" })
+        let testJob = try XCTUnwrap(plan.compileJobs.first { $0.moduleName == "AppTests" })
+        let modulePath = context.workRoot.appendingPathComponent("App.swiftmodule").path
+        let executable = context.workRoot.appendingPathComponent("App.app/App").path
+        let testingSearch = context.swiftResourceDir.appendingPathComponent("iphoneos").path
+        XCTAssertEqual(plan.testSources.map { URL(fileURLWithPath: $0).lastPathComponent }, ["PartyMinimumSpotsForVotingExactEdgeTests.swift"])
+        XCTAssertTrue(appJob.arguments.contains("-emit-executable"))
+        XCTAssertTrue(appJob.arguments.contains("-enable-testing"))
+        XCTAssertTrue(appJob.arguments.contains("-emit-module"))
+        XCTAssertTrue(appJob.arguments.contains(modulePath))
+        XCTAssertTrue(appJob.arguments.contains(executable))
+        XCTAssertFalse(appJob.arguments.contains("-c"))
+        XCTAssertTrue(testJob.arguments.contains(testingSearch))
+        XCTAssertTrue(testJob.arguments.contains(context.workRoot.path))
+        XCTAssertTrue(testJob.sources.contains { $0.hasSuffix("PartyMinimumSpotsForVotingExactEdgeTests.swift") })
+        let staged = context.swiftResourceDir.appendingPathComponent("iphoneos/Testing.swiftmodule/arm64-apple-ios.swiftinterface")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: context.swiftResourceDir.appendingPathComponent("iphoneos/SwiftUIMacros.swiftmodule").path))
+        let interface = try String(contentsOf: staged, encoding: .utf8)
+        XCTAssertTrue(interface.contains("-module-name Testing"))
+    }
+
     func testNamedTestsSelectOnlyThoseFiles() throws {
         let project = URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI.xcodeproj")
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.path))
@@ -790,6 +845,82 @@ private func braceDepth(_ text: String) -> Int {
         index = text.index(after: index)
     }
     return depth
+}
+
+private func fixtureProject() -> String {
+    """
+    // !$*UTF8*$!
+    {
+    \tarchiveVersion = 1;
+    \tobjects = {
+    \t\tAA0000000000000000000001 /* App */ = {
+    \t\t\tisa = PBXNativeTarget;
+    \t\t\tbuildConfigurationList = BB0000000000000000000001;
+    \t\t\tfileSystemSynchronizedGroups = (
+    \t\t\t\tCC0000000000000000000001 /* App */,
+    \t\t\t);
+    \t\t\tname = App;
+    \t\t\tproductType = "com.apple.product-type.application";
+    \t\t};
+    \t\tAA0000000000000000000002 /* AppTests */ = {
+    \t\t\tisa = PBXNativeTarget;
+    \t\t\tbuildConfigurationList = BB0000000000000000000002;
+    \t\t\tfileSystemSynchronizedGroups = (
+    \t\t\t\tCC0000000000000000000002 /* AppTests */,
+    \t\t\t);
+    \t\t\tname = AppTests;
+    \t\t\tproductType = "com.apple.product-type.bundle.unit-test";
+    \t\t};
+    \t\tBB0000000000000000000001 = {
+    \t\t\tisa = XCConfigurationList;
+    \t\t\tbuildConfigurations = (
+    \t\t\t\tDD0000000000000000000001 /* Debug */,
+    \t\t\t);
+    \t\t\tdefaultConfigurationName = Debug;
+    \t\t};
+    \t\tBB0000000000000000000002 = {
+    \t\t\tisa = XCConfigurationList;
+    \t\t\tbuildConfigurations = (
+    \t\t\t\tDD0000000000000000000002 /* Debug */,
+    \t\t\t);
+    \t\t\tdefaultConfigurationName = Debug;
+    \t\t};
+    \t\tCC0000000000000000000001 = {
+    \t\t\tisa = PBXFileSystemSynchronizedRootGroup;
+    \t\t\tpath = App;
+    \t\t};
+    \t\tCC0000000000000000000002 = {
+    \t\t\tisa = PBXFileSystemSynchronizedRootGroup;
+    \t\t\tpath = AppTests;
+    \t\t};
+    \t\tDD0000000000000000000001 = {
+    \t\t\tisa = XCBuildConfiguration;
+    \t\t\tbuildSettings = {
+    \t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 18.0;
+    \t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.palm.App;
+    \t\t\t\tPRODUCT_NAME = App;
+    \t\t\t};
+    \t\t\tname = Debug;
+    \t\t};
+    \t\tDD0000000000000000000002 = {
+    \t\t\tisa = XCBuildConfiguration;
+    \t\t\tbuildSettings = {
+    \t\t\t\tIPHONEOS_DEPLOYMENT_TARGET = 18.0;
+    \t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.palm.AppTests;
+    \t\t\t\tPRODUCT_NAME = AppTests;
+    \t\t\t};
+    \t\t\tname = Debug;
+    \t\t};
+    \t\tEE0000000000000000000001 /* Project object */ = {
+    \t\t\tisa = PBXProject;
+    \t\t\ttargets = (
+    \t\t\t\tAA0000000000000000000001 /* App */,
+    \t\t\t);
+    \t\t};
+    \t};
+    \trootObject = EE0000000000000000000001;
+    }
+    """
 }
 
 private func fixtureRoot() -> URL {

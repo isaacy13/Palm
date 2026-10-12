@@ -86,6 +86,65 @@ public enum SDKFrameworks {
     }
 }
 
+/// Swift Testing for iOS arm64. Xcode ships it under the iPhoneOS platform,
+/// not in `usr/lib/swift/iphoneos`. The on-device resource dir is `Documents/swift`,
+/// and swiftc looks in `<resource-dir>/iphoneos` plus any `-I` path for
+/// `Testing.swiftmodule`.
+public enum SwiftTestingModule {
+    public static let slices = [
+        "arm64-apple-ios.swiftinterface",
+        "arm64-apple-ios.swiftdoc",
+        "arm64e-apple-ios.swiftinterface",
+        "arm64e-apple-ios.swiftdoc",
+    ]
+
+    public static func searchDirectory(swiftResourceDir: URL) -> URL {
+        swiftResourceDir.appendingPathComponent("iphoneos")
+    }
+
+    public static func moduleURL(developerDir: URL) -> URL {
+        developerDir.appendingPathComponent(
+            "Platforms/iPhoneOS.platform/Developer/Library/Frameworks/Testing.framework/Modules/Testing.swiftmodule"
+        )
+    }
+
+    /// Copy the arm64 iOS interface into the Swift resource dir. Skips macOS plugins.
+    @discardableResult
+    public static func stage(into swiftResourceDir: URL) throws -> URL {
+        let search = searchDirectory(swiftResourceDir: swiftResourceDir)
+        let destination = search.appendingPathComponent("Testing.swiftmodule")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        let marker = destination.appendingPathComponent("arm64-apple-ios.swiftinterface")
+        if FileManager.default.fileExists(atPath: marker.path) {
+            return search
+        }
+        guard let source = installedModules().first(where: {
+            FileManager.default.fileExists(atPath: $0.appendingPathComponent("arm64-apple-ios.swiftinterface").path)
+        }) else {
+            return search
+        }
+        for name in slices where !name.contains("SwiftUIMacros") {
+            let from = source.appendingPathComponent(name)
+            guard FileManager.default.fileExists(atPath: from.path) else { continue }
+            try FileManager.default.copyItem(at: from, to: destination.appendingPathComponent(name))
+        }
+        return search
+    }
+
+    private static func installedModules() -> [URL] {
+        var directories: [String] = []
+        if let developer = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !developer.isEmpty {
+            directories.append(developer)
+        }
+        directories.append("/var/db/xcode_select_link")
+        directories.append("/Applications/Xcode-beta.app/Contents/Developer")
+        directories.append("/Applications/Xcode.app/Contents/Developer")
+        var modules = directories.map { moduleURL(developerDir: URL(fileURLWithPath: $0)) }
+        modules.append(Bundle.main.bundleURL.appendingPathComponent("swift/iphoneos/Testing.swiftmodule"))
+        return modules
+    }
+}
+
 public enum PlistValue: Codable, Equatable {
     case string(String)
     case bool(Bool)

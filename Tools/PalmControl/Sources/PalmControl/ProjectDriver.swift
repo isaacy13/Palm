@@ -235,6 +235,7 @@ public struct ProjectDriver {
         for framework in linkExtras.frameworks where !appFrameworks.contains(framework) {
             appFrameworks.append(framework)
         }
+        let emitsTestableAppModule = includeTests && !testSources.isEmpty
         if !sources.swift.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name),
@@ -246,6 +247,7 @@ public struct ProjectDriver {
                 frameworkSearchPaths: moduleSearchPaths,
                 headerSearchPaths: packages.filter { !$0.isTest }.flatMap(\.headerPaths),
                 emitModule: false,
+                testableModule: emitsTestableAppModule,
                 output: appOutput,
                 moduleMaps: moduleMaps,
                 libraries: linkExtras.libraries,
@@ -262,6 +264,7 @@ public struct ProjectDriver {
             ))
         }
         if includeTests && !testSources.isEmpty {
+            let testingSearch = try SwiftTestingModule.stage(into: context.swiftResourceDir)
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name) + "Tests",
                 sources: try sourcesWithIsolatedDeinits(try sourcesWithoutBindingMethodSetters(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutGenerableMacros(try sourcesWithoutPreviews(testSources, context: context), context: context), context: context), sdkRoot: context.sdkRoot, context: context), context: context), context: context, enabled: usesIsolatedDeinits(settings)),
@@ -270,6 +273,7 @@ public struct ProjectDriver {
                 context: context,
                 overlayRoot: overlaid.isEmpty ? nil : overlayRoot,
                 frameworkSearchPaths: moduleSearchPaths,
+                extraIncludePaths: [testingSearch.path],
                 emitModule: false,
                 output: testExecutable,
                 moduleMaps: moduleMaps,
@@ -412,7 +416,9 @@ func copyBundleResources(_ paths: [String], nextTo executable: String) throws ->
                           overlayRoot: URL?,
                           frameworkSearchPaths: [String] = [],
                           headerSearchPaths: [String] = [],
+                          extraIncludePaths: [String] = [],
                           emitModule: Bool,
+                          testableModule: Bool = false,
                           output: String?,
                           moduleMaps: [String] = [],
                           swiftPackage: Bool = false,
@@ -453,6 +459,16 @@ func copyBundleResources(_ paths: [String], nextTo executable: String) throws ->
                 "-o", context.workRoot.appendingPathComponent("\(moduleName).o").path,
             ])
         } else if let output {
+            if testableModule {
+                // `-emit-module` alone drops the executable. `-emit-executable` keeps the
+                // app link and still writes the swiftmodule `@testable import` needs.
+                arguments.append(contentsOf: [
+                    "-emit-executable",
+                    "-enable-testing",
+                    "-emit-module",
+                    "-emit-module-path", context.workRoot.appendingPathComponent("\(compiledName).swiftmodule").path,
+                ])
+            }
             arguments.append(contentsOf: ["-o", output])
         }
         arguments.append(contentsOf: ["-F", context.sdkRoot.appendingPathComponent("System/Library/Frameworks").path])
@@ -463,6 +479,9 @@ func copyBundleResources(_ paths: [String], nextTo executable: String) throws ->
             arguments.append(contentsOf: ["-F", path])
         }
         for path in headerSearchPaths {
+            arguments.append(contentsOf: ["-I", path])
+        }
+        for path in extraIncludePaths {
             arguments.append(contentsOf: ["-I", path])
         }
         arguments.append(contentsOf: ["-I", context.workRoot.path])

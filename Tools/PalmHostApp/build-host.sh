@@ -110,6 +110,21 @@ cp -R "$ROOT/Nyxian/LindChain/OpenSSL.xcframework/ios-arm64/OpenSSL.framework" "
 rm -rf "$APP/Frameworks/MobileDevelopmentKit.framework/Headers" "$APP/Frameworks/MobileDevelopmentKit.framework/Modules"
 cp "$PROFILE" "$APP/embedded.mobileprovision"
 
+if DEVELOPER="$(xcode-select -p 2>/dev/null)"; then
+  TESTING_MODULE="$DEVELOPER/Platforms/iPhoneOS.platform/Developer/Library/Frameworks/Testing.framework/Modules/Testing.swiftmodule"
+else
+  TESTING_MODULE=""
+fi
+if [[ -n "$TESTING_MODULE" && -d "$TESTING_MODULE" ]]; then
+  echo "staging Testing.swiftmodule"
+  mkdir -p "$APP/swift/iphoneos/Testing.swiftmodule"
+  for slice in arm64-apple-ios.swiftinterface arm64-apple-ios.swiftdoc arm64e-apple-ios.swiftinterface arm64e-apple-ios.swiftdoc; do
+    if [[ -f "$TESTING_MODULE/$slice" ]]; then
+      cp "$TESTING_MODULE/$slice" "$APP/swift/iphoneos/Testing.swiftmodule/$slice"
+    fi
+  done
+fi
+
 LIVE="${PALM_LIVEPROCESS:-/tmp/palm-liveprocess/Build/LiveProcess.appex}"
 if [[ -d "$LIVE" ]]; then
   echo "embedding LiveProcess"
