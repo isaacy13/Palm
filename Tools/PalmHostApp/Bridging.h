@@ -8,3 +8,4 @@ void PalmBootSurface(void);
 kern_return_t trust_nxt2_sign(const char *path, CFDictionaryRef entitlements, bool signBlob, const char *priv_der_path);
 
 MDKJob *PalmLinkerJob(NSArray<NSString *> *arguments);
+MDKJob *PalmJob(MDKJobType type, NSArray<NSString *> *arguments, NSArray<NSURL *> *inputs, NSURL *output);

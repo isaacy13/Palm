@@ -45,6 +45,10 @@ public struct BuildPlan: Codable, Equatable {
     public var testExecutable: String?
     public var includesTests: Bool
     public var preparesLaunch: Bool
+    /// Compiled bundles to place next to the executable, such as a Core Data `.momd`.
+    public var bundleResources: [String] = []
+    /// `InfoOverrides.plist` plus `INFOPLIST_KEY_*` usage strings for the signed app.
+    public var infoPlist: [String: PlistValue] = [:]
 
     public var descriptionForLog: String {
         var lines: [String] = []
@@ -100,7 +104,7 @@ public struct DriverContext: Equatable {
     public static func nyxianDocuments(home: URL) -> DriverContext {
         let root = home.appendingPathComponent("Documents")
         return DriverContext(
-            sdkRoot: root.appendingPathComponent("SDK/iPhoneOS27.0.sdk"),
+            sdkRoot: root.appendingPathComponent("SDK/iPhoneOS26.5.sdk"),
             swiftResourceDir: root.appendingPathComponent("swift"),
             moduleCache: root.appendingPathComponent("ModuleCache"),
             workRoot: root.appendingPathComponent("Cache/Palm")
@@ -124,6 +128,7 @@ public struct ProjectDriver {
         }
         let projectDirectory = xcodeproj.deletingLastPathComponent()
         repairMapKitCameraInterface(sdkRoot: context.sdkRoot)
+        repairFoundationModelsTranscriptInterface(sdkRoot: context.sdkRoot)
         let text = try String(contentsOf: pbxproj, encoding: .utf8)
         let objects = try PbxParser.objects(in: text)
         guard let target = nativeTarget(named: name, objects: objects) else {
@@ -180,7 +185,7 @@ public struct ProjectDriver {
             if !package.sources.isEmpty {
                 let job = swiftJob(
                     moduleName: package.name,
-                    sources: try sourcesWithResourceBundle(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutPreviews(package.sources, context: context), context: context), sdkRoot: context.sdkRoot, context: context), moduleName: sanitizedModule(package.name), context: context),
+                    sources: try sourcesWithResourceBundle(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutGenerableMacros(try sourcesWithoutPreviews(package.sources, context: context), context: context), context: context), sdkRoot: context.sdkRoot, context: context), moduleName: sanitizedModule(package.name), context: context),
                     frameworks: linked,
                     deployment: deployment,
                     context: context,
@@ -215,11 +220,20 @@ public struct ProjectDriver {
             }
         }
         let appOutput = context.workRoot.appendingPathComponent("\(name).app/\(name)").path
+        let linkExtras = packageLinkExtras(
+            from: packages.filter { !$0.isTest },
+            frameworksOnDisk: frameworkNames(in: moduleSearchPaths),
+            alreadyLinked: Set(linked)
+        )
+        var appFrameworks = linked
+        for framework in linkExtras.frameworks where !appFrameworks.contains(framework) {
+            appFrameworks.append(framework)
+        }
         if !sources.swift.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name),
-                sources: try sourcesWithoutBindingMethodSetters(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutPreviews(sources.swift, context: context), context: context), sdkRoot: context.sdkRoot, context: context), context: context),
-                frameworks: linked,
+                sources: try sourcesWithoutBindingMethodSetters(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutGenerableMacros(try sourcesWithoutPreviews(sources.swift, context: context), context: context), context: context), sdkRoot: context.sdkRoot, context: context), context: context),
+                frameworks: appFrameworks,
                 deployment: deployment,
                 context: context,
                 overlayRoot: overlaid.isEmpty ? nil : overlayRoot,
@@ -228,6 +242,7 @@ public struct ProjectDriver {
                 emitModule: false,
                 output: appOutput,
                 moduleMaps: moduleMaps,
+                libraries: linkExtras.libraries,
                 extraArguments: swiftLanguageArguments(from: settings)
             ))
         }
@@ -243,8 +258,8 @@ public struct ProjectDriver {
         if includeTests && !testSources.isEmpty {
             compileJobs.append(swiftJob(
                 moduleName: sanitizedModule(name) + "Tests",
-                sources: try sourcesWithCrossImports(try sourcesWithoutEntryMacros(testSources, context: context), sdkRoot: context.sdkRoot, context: context),
-                frameworks: linked,
+                sources: try sourcesWithoutBindingMethodSetters(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutGenerableMacros(try sourcesWithoutPreviews(testSources, context: context), context: context), context: context), sdkRoot: context.sdkRoot, context: context), context: context),
+                frameworks: appFrameworks,
                 deployment: deployment,
                 context: context,
                 overlayRoot: overlaid.isEmpty ? nil : overlayRoot,
@@ -252,15 +267,19 @@ public struct ProjectDriver {
                 emitModule: false,
                 output: testExecutable,
                 moduleMaps: moduleMaps,
+                libraries: linkExtras.libraries,
                 extraArguments: swiftLanguageArguments(from: settings)
             ))
         }
 
         var linkArguments = ["-o", appOutput]
         linkArguments.append(contentsOf: packageObjects)
-        for framework in linked {
+        for framework in appFrameworks {
             linkArguments.append("-framework")
             linkArguments.append(framework)
+        }
+        for library in linkExtras.libraries {
+            linkArguments.append("-l\(library)")
         }
         linkArguments.append(contentsOf: ["-F", context.sdkRoot.appendingPathComponent("System/Library/Frameworks").path])
         for path in moduleSearchPaths {
@@ -276,8 +295,8 @@ public struct ProjectDriver {
             entitlements: entitlements,
             entitlementKeys: entitlements.keys.sorted(),
             compileJobs: compileJobs,
-            linkJob: LinkerJob(output: appOutput, frameworks: linked, arguments: linkArguments),
-            linkedFrameworks: linked,
+            linkJob: LinkerJob(output: appOutput, frameworks: appFrameworks, arguments: linkArguments),
+            linkedFrameworks: appFrameworks,
             sdkFrameworks: sdkFrameworks.sorted(),
             missingSDKFrameworks: stillMissing,
             localPackages: packages.filter { !$0.isTest }.map(\.name).sorted(),
@@ -285,9 +304,99 @@ public struct ProjectDriver {
             testSources: testSources.map { $0.path },
             testExecutable: testExecutable,
             includesTests: includeTests,
-            preparesLaunch: kind.requestsLaunch
+            preparesLaunch: kind.requestsLaunch,
+            bundleResources: compiledDataModels(under: projectDirectory),
+            infoPlist: launchInfoDictionary(settings: settings, projectDirectory: projectDirectory, moduleName: name)
         )
     }
+
+func launchInfoDictionary(settings: [String: String], projectDirectory: URL, moduleName: String) -> [String: PlistValue] {
+    var variables = settings
+    variables["PRODUCT_MODULE_NAME"] = settings["PRODUCT_MODULE_NAME"] ?? moduleName
+    variables["TARGET_NAME"] = settings["TARGET_NAME"] ?? moduleName
+    var info: [String: PlistValue] = [:]
+    if let relative = settings["INFOPLIST_FILE"] {
+        let url = projectDirectory.appendingPathComponent(relative)
+        if let overrides = try? PlistValue.read(from: url) {
+            info = overrides.mapValues { expandPlistVariables($0, variables: variables) }
+        }
+    }
+    for (key, value) in settings where key.hasPrefix("INFOPLIST_KEY_") && !key.contains("[") {
+        let name = String(key.dropFirst("INFOPLIST_KEY_".count))
+        if value == "YES" {
+            info[name] = .bool(true)
+        } else if value == "NO" {
+            info[name] = .bool(false)
+        } else {
+            info[name] = .string(expandPlistText(value, variables: variables))
+        }
+    }
+    return info
+}
+
+func expandPlistVariables(_ value: PlistValue, variables: [String: String]) -> PlistValue {
+    switch value {
+    case .string(let text):
+        return .string(expandPlistText(text, variables: variables))
+    case .array(let values):
+        return .array(values.map { expandPlistVariables($0, variables: variables) })
+    case .dictionary(let values):
+        return .dictionary(values.mapValues { expandPlistVariables($0, variables: variables) })
+    default:
+        return value
+    }
+}
+
+func expandPlistText(_ text: String, variables: [String: String]) -> String {
+    var result = text
+    for (key, value) in variables where !value.contains("$(") {
+        result = result.replacingOccurrences(of: "$(\(key))", with: value)
+    }
+    return result
+}
+
+func compiledDataModels(under root: URL) -> [String] {
+    guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+        return []
+    }
+    let skip: Set<String> = [".build", "DerivedData", "Checkouts", "GuideAIUnitTests", "GuideAISnapshotTests", "GuideAIWatch"]
+    var found: [String] = []
+    for case let url as URL in enumerator {
+        if skip.contains(url.lastPathComponent) {
+            enumerator.skipDescendants()
+            continue
+        }
+        guard url.pathExtension == "xcdatamodeld" else { continue }
+        let compiled = url.deletingPathExtension().appendingPathExtension("momd")
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: compiled.path, isDirectory: &isDirectory), isDirectory.boolValue {
+            found.append(compiled.path)
+        }
+        enumerator.skipDescendants()
+    }
+    return found.sorted()
+}
+
+func copyBundleResources(_ paths: [String], nextTo executable: String) throws -> [String] {
+    let bundle = URL(fileURLWithPath: executable).deletingLastPathComponent()
+    let files = FileManager.default
+    try files.createDirectory(at: bundle, withIntermediateDirectories: true)
+    var copied: [String] = []
+    for path in paths {
+        let source = URL(fileURLWithPath: path)
+        let destination = bundle.appendingPathComponent(source.lastPathComponent)
+        if files.fileExists(atPath: destination.path) {
+            try files.removeItem(at: destination)
+        }
+        do {
+            try files.copyItem(at: source, to: destination)
+        } catch {
+            throw ControlError.linkFailed("could not copy \(source.lastPathComponent) into \(bundle.path)")
+        }
+        copied.append(source.lastPathComponent)
+    }
+    return copied
+}
 
     private func swiftJob(moduleName: String,
                           sources: [URL],
@@ -302,6 +411,7 @@ public struct ProjectDriver {
                           moduleMaps: [String] = [],
                           swiftPackage: Bool = false,
                           swiftVersion: String = "6",
+                          libraries: [String] = [],
                           extraArguments: [String] = []) -> CompilerJob {
         let compiledName = sanitizedModule(moduleName)
         var arguments = [
@@ -310,6 +420,7 @@ public struct ProjectDriver {
             "-Xllvm", "-aarch64-use-tbi",
             "-sdk", context.sdkRoot.path,
             "-resource-dir", context.swiftResourceDir.path,
+            "-in-process-plugin-server-path", context.swiftResourceDir.appendingPathComponent("host/libSwiftInProcPluginServer.dylib").path,
             "-plugin-path", context.swiftResourceDir.appendingPathComponent("host/plugins").path,
             "-module-cache-path", context.moduleCache.path,
             "-Xfrontend", "-enable-objc-interop",
@@ -352,6 +463,9 @@ public struct ProjectDriver {
         for framework in frameworks {
             arguments.append("-framework")
             arguments.append(framework)
+        }
+        for library in libraries {
+            arguments.append("-l\(library)")
         }
         arguments.append(contentsOf: sources.map(\.path))
         return CompilerJob(tool: "swiftc", moduleName: compiledName, sources: sources.map(\.path), arguments: arguments)
@@ -408,6 +522,9 @@ private struct PackageUnit {
     var umbrellaHeader: URL?
     var publicHeaders: [URL]
     var dependencies: [String]
+    var linkDependencies: [String]
+    var linkLibraries: [String]
+    var linkFrameworks: [String]
     var defines: [String]
     var isTest: Bool
     var swiftVersion: String
@@ -470,6 +587,50 @@ private func repairMapKitCameraInterface(sdkRoot: URL) {
       public static func == (a: _MapKit_SwiftUI.MapCameraPosition, b: _MapKit_SwiftUI.MapCameraPosition) -> Swift.Bool
     }
     """
+    try? text.write(to: interface, atomically: true, encoding: .utf8)
+}
+
+/// The iOS 26.5 FoundationModels interface stops at the iOS 26 `Transcript.Entry`
+/// cases. iOS 27 adds `reasoning`, and client code still typechecks that case
+/// inside `#available(iOS 27.0, *)`.
+private func repairFoundationModelsTranscriptInterface(sdkRoot: URL) {
+    let interface = sdkRoot.appendingPathComponent(
+        "System/Library/Frameworks/FoundationModels.framework/Modules/FoundationModels.swiftmodule/arm64e-apple-ios.swiftinterface"
+    )
+    guard var text = try? String(contentsOf: interface, encoding: .utf8) else { return }
+    guard !text.contains("case reasoning(") else { return }
+    let responseCase = "    case response(FoundationModels.Transcript.Response)\n"
+    let equality = "  public static func == (a: FoundationModels.Transcript, b: FoundationModels.Transcript) -> Swift.Bool\n"
+    guard let responseRange = text.range(of: responseCase), let equalityRange = text.range(of: equality) else { return }
+    let reasoningCase = """
+        case response(FoundationModels.Transcript.Response)
+        @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+        @available(tvOS, unavailable)
+        @available(watchOS, unavailable)
+        case reasoning(FoundationModels.Transcript.Reasoning)
+
+    """
+    let reasoningStruct = """
+      @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+      @available(tvOS, unavailable)
+      @available(watchOS, unavailable)
+      public struct Reasoning : Swift.Sendable, Swift.Identifiable, Swift.Equatable {
+        public var id: Swift.String
+        public var segments: [FoundationModels.Transcript.Segment]
+        public var signature: Foundation.Data?
+        public var metadata: [Swift.String : any Swift.Codable & Swift.Sendable & Swift.Equatable]
+        public init(id: Swift.String = UUID().uuidString, metadata: [Swift.String : any Swift.Sendable & Swift.Codable & Swift.Equatable] = [:], segments: [FoundationModels.Transcript.Segment], signature: Foundation.Data? = nil)
+        public static func == (lhs: FoundationModels.Transcript.Reasoning, rhs: FoundationModels.Transcript.Reasoning) -> Swift.Bool
+        @available(iOS 27.0, macOS 27.0, visionOS 27.0, *)
+        @available(tvOS, unavailable)
+        @available(watchOS, unavailable)
+        public typealias ID = Swift.String
+      }
+      public static func == (a: FoundationModels.Transcript, b: FoundationModels.Transcript) -> Swift.Bool
+
+    """
+    text.replaceSubrange(equalityRange, with: reasoningStruct)
+    text.replaceSubrange(responseRange, with: reasoningCase)
     try? text.write(to: interface, atomically: true, encoding: .utf8)
 }
 
@@ -685,6 +846,455 @@ private func sourcesWithCrossImports(_ sources: [URL], sdkRoot: URL, context: Dr
     return rewritten
 }
 
+/// FoundationModelsMacros is a Mac compiler plugin. Expand `@Generable` the
+/// way that plugin would, so the on-device compiler never has to load it.
+private func sourcesWithoutGenerableMacros(_ sources: [URL], context: DriverContext) throws -> [URL] {
+    var rewritten: [URL] = []
+    let directory = context.workRoot.appendingPathComponent("GenerableExpanded")
+    for source in sources {
+        guard let text = try? String(contentsOf: source, encoding: .utf8), text.contains("@Generable") else {
+            rewritten.append(source)
+            continue
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let dest = directory.appendingPathComponent(shortSourceName(source))
+        try expandGenerableMacros(text).write(to: dest, atomically: true, encoding: .utf8)
+        rewritten.append(dest)
+    }
+    return rewritten
+}
+
+func expandGenerableMacros(_ text: String) -> String {
+    let expanded = expandGenerable(text, parents: [])
+    if expanded.extensions.isEmpty { return expanded.body }
+    return expanded.body + "\n" + expanded.extensions
+}
+
+private struct GenerableExpansion {
+    var body: String
+    var extensions: String
+}
+
+private struct GenerableProperty {
+    var name: String
+    var type: String
+    var description: String?
+    var guides: [String]
+}
+
+private func expandGenerable(_ text: String, parents: [String]) -> GenerableExpansion {
+    guard text.contains("@Generable") else { return GenerableExpansion(body: text, extensions: "") }
+    var body = ""
+    var extensions = ""
+    var index = text.startIndex
+    var depth = 0
+    var typeStack: [(name: String, depth: Int)] = []
+    var pendingType: String?
+    while index < text.endIndex {
+        if text[index] == "/" && text.index(after: index) < text.endIndex && text[text.index(after: index)] == "/" {
+            let end = text[index...].firstIndex(of: "\n") ?? text.endIndex
+            body.append(contentsOf: text[index..<end])
+            index = end
+            continue
+        }
+        if text[index] == "/" && text.index(after: index) < text.endIndex && text[text.index(after: index)] == "*" {
+            let search = text.index(index, offsetBy: 2)
+            let end = text.range(of: "*/", range: search..<text.endIndex)?.upperBound ?? text.endIndex
+            body.append(contentsOf: text[index..<end])
+            index = end
+            continue
+        }
+        if text[index] == "\"" {
+            let end = endOfStringLiteral(text, from: index)
+            body.append(contentsOf: text[index..<end])
+            index = end
+            continue
+        }
+        if text[index...].hasPrefix("@Generable"), !identifierContinues(text, at: text.index(index, offsetBy: "@Generable".count)) {
+            if let consumed = consumeGenerableType(text, from: index, parents: parents + typeStack.map(\.name)) {
+                body.append(contentsOf: consumed.body)
+                if !consumed.extensions.isEmpty {
+                    if !extensions.isEmpty { extensions.append("\n") }
+                    extensions.append(consumed.extensions)
+                }
+                index = consumed.end
+                pendingType = nil
+                continue
+            }
+        }
+        if let name = typeDeclarationName(text, from: index) {
+            pendingType = name.name
+            let end = text.index(index, offsetBy: name.keywordCount)
+            body.append(contentsOf: text[index..<end])
+            index = end
+            continue
+        }
+        if text[index] == "{" {
+            depth += 1
+            if let name = pendingType {
+                typeStack.append((name, depth))
+                pendingType = nil
+            }
+            body.append("{")
+            index = text.index(after: index)
+            continue
+        }
+        if text[index] == "}" {
+            depth -= 1
+            typeStack.removeAll { $0.depth > depth }
+            body.append("}")
+            index = text.index(after: index)
+            continue
+        }
+        body.append(text[index])
+        index = text.index(after: index)
+    }
+    return GenerableExpansion(body: body, extensions: extensions)
+}
+
+private struct ConsumedGenerable {
+    var body: String
+    var extensions: String
+    var end: String.Index
+}
+
+private func consumeGenerableType(_ text: String, from start: String.Index, parents: [String]) -> ConsumedGenerable? {
+    var index = text.index(start, offsetBy: "@Generable".count)
+    index = skipPreviewSpace(text, from: index)
+    if index < text.endIndex, text[index] == "(" {
+        guard let after = skipBalancedDelimiters(text, from: index, open: "(", close: ")") else { return nil }
+        index = skipPreviewSpace(text, from: after)
+    }
+    let modifiers: Set<String> = ["nonisolated", "public", "private", "internal", "fileprivate", "open", "final", "package"]
+    var header = ""
+    while let word = identifier(text, from: index), modifiers.contains(word) {
+        header.append(word)
+        index = text.index(index, offsetBy: word.count)
+        let spaced = skipPreviewSpace(text, from: index)
+        header.append(contentsOf: text[index..<spaced])
+        index = spaced
+    }
+    guard text[index...].hasPrefix("struct") else { return nil }
+    header.append("struct")
+    index = text.index(index, offsetBy: "struct".count)
+    let afterKeyword = skipPreviewSpace(text, from: index)
+    header.append(contentsOf: text[index..<afterKeyword])
+    index = afterKeyword
+    guard let name = identifier(text, from: index) else { return nil }
+    header.append(name)
+    index = text.index(index, offsetBy: name.count)
+    guard let open = text[index...].firstIndex(of: "{") else { return nil }
+    let inheritance = String(text[index..<open])
+    header.append(contentsOf: inheritance)
+    guard let close = endOfBrace(text, from: open) else { return nil }
+    let rawBody = String(text[text.index(after: open)..<close])
+    let parsed = stripGuides(rawBody)
+    let nested = expandGenerable(parsed.body, parents: parents + [name])
+    let qualified = (parents + [name]).joined(separator: ".")
+    let equatable = inheritanceClause(inheritance).contains("Equatable")
+    let members = generableMembers(parsed.properties, equatable: equatable)
+    let extensionText = generableExtension(qualified: qualified, properties: parsed.properties)
+    var combined = nested.extensions
+    if !combined.isEmpty { combined.append("\n") }
+    combined.append(extensionText)
+    let rewritten = header + "{\n" + nested.body + "\n" + members + "\n}"
+    return ConsumedGenerable(body: rewritten, extensions: combined, end: text.index(after: close))
+}
+
+private func generableMembers(_ properties: [GenerableProperty], equatable: Bool) -> String {
+    let fields = properties.map { property in
+        "            FoundationModels.GenerationSchema.Property(\(propertyCall(property)))"
+    }.joined(separator: ",\n")
+    let adds = properties.map { "    addProperty(name: \"\($0.name)\", value: self.\($0.name))" }.joined(separator: "\n")
+    let partials = properties.map { "    var \($0.name): \($0.type).PartiallyGenerated?" }.joined(separator: "\n")
+    let reads = properties.map { "        self.\($0.name) = try content.value(forProperty: \"\($0.name)\")" }.joined(separator: "\n")
+    let conformance = equatable
+        ? "Identifiable, nonisolated FoundationModels.ConvertibleFromGeneratedContent, Equatable"
+        : "Identifiable, nonisolated FoundationModels.ConvertibleFromGeneratedContent"
+    return """
+    nonisolated static var generationSchema: FoundationModels.GenerationSchema {
+        FoundationModels.GenerationSchema(
+            type: Self.self,
+            properties: [
+    \(fields)
+            ]
+        )
+    }
+
+    nonisolated var generatedContent: GeneratedContent {
+        let explicitNil = false
+        var properties = [(name: String, value: any ConvertibleToGeneratedContent)]()
+    \(adds)
+        return GeneratedContent(
+            properties: properties,
+            uniquingKeysWith: { _, second in
+                second
+            }
+        )
+        func addProperty(name: String, value: some Generable) {
+          properties.append((name: name, value: value))
+        }
+        func addProperty(name: String, value: (some Generable)?) {
+          if explicitNil || value != nil {
+            properties.append((name: name, value: value))
+          }
+        }
+    }
+
+    nonisolated struct PartiallyGenerated: \(conformance) {
+        var id: GenerationID
+    \(partials)
+        nonisolated init(_ content: FoundationModels.GeneratedContent) throws {
+            self.id = content.id ?? GenerationID()
+    \(reads)
+        }
+    }
+    """
+}
+
+private func generableExtension(qualified: String, properties: [GenerableProperty]) -> String {
+    let reads = properties.map { "        self.\($0.name) = try content.value(forProperty: \"\($0.name)\")" }.joined(separator: "\n")
+    return """
+    extension \(qualified): nonisolated FoundationModels.Generable {
+        nonisolated init(_ content: FoundationModels.GeneratedContent) throws {
+    \(reads)
+        }
+    }
+    """
+}
+
+private func propertyCall(_ property: GenerableProperty) -> String {
+    var parts = ["name: \"\(property.name)\""]
+    if let description = property.description {
+        parts.append("description: \(description)")
+    }
+    parts.append("type: \(property.type).self")
+    if !property.guides.isEmpty {
+        parts.append("guides: [\(property.guides.joined(separator: ", "))]")
+    }
+    return parts.joined(separator: ", ")
+}
+
+private func stripGuides(_ body: String) -> (body: String, properties: [GenerableProperty]) {
+    var result = ""
+    var properties: [GenerableProperty] = []
+    var index = body.startIndex
+    var depth = 0
+    var pendingDescription: String?
+    var pendingGuides: [String] = []
+    while index < body.endIndex {
+        if body[index] == "/" && body.index(after: index) < body.endIndex && body[body.index(after: index)] == "/" {
+            let end = body[index...].firstIndex(of: "\n") ?? body.endIndex
+            result.append(contentsOf: body[index..<end])
+            index = end
+            continue
+        }
+        if body[index] == "\"" {
+            let end = endOfStringLiteral(body, from: index)
+            result.append(contentsOf: body[index..<end])
+            index = end
+            continue
+        }
+        if body[index] == "{" {
+            depth += 1
+            result.append("{")
+            index = body.index(after: index)
+            continue
+        }
+        if body[index] == "}" {
+            depth -= 1
+            result.append("}")
+            index = body.index(after: index)
+            continue
+        }
+        if depth == 0, body[index...].hasPrefix("@Guide"), !identifierContinues(body, at: body.index(index, offsetBy: "@Guide".count)) {
+            var cursor = body.index(index, offsetBy: "@Guide".count)
+            cursor = skipPreviewSpace(body, from: cursor)
+            if cursor < body.endIndex, body[cursor] == "(" {
+                if let after = skipBalancedDelimiters(body, from: cursor, open: "(", close: ")") {
+                    let inside = String(body[body.index(after: cursor)..<body.index(before: after)])
+                    let parsed = guideArguments(inside)
+                    pendingDescription = parsed.description
+                    pendingGuides = parsed.guides
+                    index = after
+                    continue
+                }
+            }
+            index = cursor
+            continue
+        }
+        if depth == 0, let property = storedProperty(body, from: index) {
+            properties.append(GenerableProperty(
+                name: property.name,
+                type: property.type,
+                description: pendingDescription,
+                guides: pendingGuides
+            ))
+            pendingDescription = nil
+            pendingGuides = []
+            result.append(contentsOf: body[index..<property.end])
+            index = property.end
+            continue
+        }
+        result.append(body[index])
+        index = body.index(after: index)
+    }
+    return (result, properties)
+}
+
+private func storedProperty(_ text: String, from index: String.Index) -> (name: String, type: String, end: String.Index)? {
+    let prefixes = ["let ", "var "]
+    guard let prefix = prefixes.first(where: { text[index...].hasPrefix($0) }) else { return nil }
+    if index > text.startIndex {
+        let previous = text[text.index(before: index)]
+        if previous.isLetter || previous.isNumber || previous == "_" { return nil }
+    }
+    var cursor = text.index(index, offsetBy: prefix.count)
+    guard let name = identifier(text, from: cursor) else { return nil }
+    cursor = text.index(cursor, offsetBy: name.count)
+    cursor = skipPreviewSpace(text, from: cursor)
+    guard cursor < text.endIndex, text[cursor] == ":" else { return nil }
+    cursor = skipPreviewSpace(text, from: text.index(after: cursor))
+    let typeStart = cursor
+    var depth = 0
+    while cursor < text.endIndex {
+        let character = text[cursor]
+        if character == "(" || character == "[" || character == "<" { depth += 1 }
+        if character == ")" || character == "]" || character == ">" { depth -= 1 }
+        if depth == 0 && (character == "=" || character == "{" || character == "\n" || character == "/") {
+            break
+        }
+        cursor = text.index(after: cursor)
+    }
+    let type = text[typeStart..<cursor].trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !type.isEmpty, !type.contains("{") else { return nil }
+    return (name, type, cursor)
+}
+
+private func guideArguments(_ text: String) -> (description: String?, guides: [String]) {
+    var description: String?
+    var guides: [String] = []
+    for argument in splitTopLevel(text, separator: ",") {
+        let trimmed = argument.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { continue }
+        if trimmed.hasPrefix("description:") {
+            description = trimmed.dropFirst("description:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            guides.append(trimmed)
+        }
+    }
+    return (description, guides)
+}
+
+private func splitTopLevel(_ text: String, separator: Character) -> [String] {
+    var parts: [String] = []
+    var current = ""
+    var depth = 0
+    var index = text.startIndex
+    while index < text.endIndex {
+        if text[index] == "\"" {
+            let end = endOfStringLiteral(text, from: index)
+            current.append(contentsOf: text[index..<end])
+            index = end
+            continue
+        }
+        let character = text[index]
+        if character == "(" || character == "[" || character == "{" || character == "<" { depth += 1 }
+        if character == ")" || character == "]" || character == "}" || character == ">" { depth -= 1 }
+        if character == separator && depth == 0 {
+            parts.append(current)
+            current = ""
+        } else {
+            current.append(character)
+        }
+        index = text.index(after: index)
+    }
+    parts.append(current)
+    return parts
+}
+
+private func inheritanceClause(_ headerTail: String) -> [String] {
+    guard let colon = headerTail.firstIndex(of: ":") else { return [] }
+    return headerTail[headerTail.index(after: colon)...]
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+}
+
+private struct TypeKeyword {
+    var name: String
+    var keywordCount: Int
+}
+
+private func typeDeclarationName(_ text: String, from index: String.Index) -> TypeKeyword? {
+    let keywords = ["struct", "enum", "class", "actor"]
+    guard let keyword = keywords.first(where: { text[index...].hasPrefix($0) }) else { return nil }
+    let after = text.index(index, offsetBy: keyword.count)
+    if index > text.startIndex {
+        let previous = text[text.index(before: index)]
+        if previous.isLetter || previous.isNumber || previous == "_" { return nil }
+    }
+    guard after < text.endIndex, text[after].isWhitespace else { return nil }
+    let nameStart = skipPreviewSpace(text, from: after)
+    guard let name = identifier(text, from: nameStart) else { return nil }
+    return TypeKeyword(name: name, keywordCount: keyword.count)
+}
+
+private func identifier(_ text: String, from index: String.Index) -> String? {
+    guard index < text.endIndex, text[index].isLetter || text[index] == "_" else { return nil }
+    var cursor = text.index(after: index)
+    while cursor < text.endIndex, text[cursor].isLetter || text[cursor].isNumber || text[cursor] == "_" {
+        cursor = text.index(after: cursor)
+    }
+    return String(text[index..<cursor])
+}
+
+private func identifierContinues(_ text: String, at index: String.Index) -> Bool {
+    guard index < text.endIndex else { return false }
+    return text[index].isLetter || text[index].isNumber || text[index] == "_"
+}
+
+private func endOfBrace(_ text: String, from open: String.Index) -> String.Index? {
+    guard let after = skipBalancedDelimiters(text, from: open, open: "{", close: "}") else { return nil }
+    return text.index(before: after)
+}
+
+private func skipBalancedDelimiters(_ text: String, from open: String.Index, open openChar: Character, close closeChar: Character) -> String.Index? {
+    var depth = 0
+    var index = open
+    while index < text.endIndex {
+        if text[index] == "/" && text.index(after: index) < text.endIndex && text[text.index(after: index)] == "/" {
+            index = text[index...].firstIndex(of: "\n") ?? text.endIndex
+            continue
+        }
+        if text[index] == "\"" {
+            index = endOfStringLiteral(text, from: index)
+            continue
+        }
+        if text[index] == openChar { depth += 1 }
+        if text[index] == closeChar {
+            depth -= 1
+            if depth == 0 { return text.index(after: index) }
+        }
+        index = text.index(after: index)
+    }
+    return nil
+}
+
+private func endOfStringLiteral(_ text: String, from index: String.Index) -> String.Index {
+    var cursor = text.index(after: index)
+    while cursor < text.endIndex {
+        if text[cursor] == "\\" {
+            cursor = text.index(after: cursor)
+            if cursor < text.endIndex { cursor = text.index(after: cursor) }
+            continue
+        }
+        if text[cursor] == "\"" { return text.index(after: cursor) }
+        if text[cursor] == "\n" { return cursor }
+        cursor = text.index(after: cursor)
+    }
+    return text.endIndex
+}
+
 private let entryKeyProtocols = [
     "EnvironmentValues": "EnvironmentKey",
     "Transaction": "TransactionKey",
@@ -816,10 +1426,16 @@ private func sourcesWithoutPreviews(_ sources: [URL], context: DriverContext) th
     return rewritten
 }
 
-private func stripPreviewBlocks(_ text: String) -> String {
+func stripPreviewBlocks(_ text: String) -> String {
     var result = ""
     var index = text.startIndex
     while let range = text.range(of: "#Preview", range: index..<text.endIndex) {
+        let lineStart = text[..<range.lowerBound].lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
+        if text[lineStart..<range.lowerBound].contains("//") {
+            result.append(contentsOf: text[index..<range.upperBound])
+            index = range.upperBound
+            continue
+        }
         result.append(contentsOf: dropPreviewAttributes(String(text[index..<range.lowerBound])))
         guard let open = text[range.upperBound...].firstIndex(of: "{") else {
             result.append(contentsOf: text[range.lowerBound...])
@@ -846,9 +1462,59 @@ private func stripPreviewBlocks(_ text: String) -> String {
             result.append(contentsOf: text[range.lowerBound...])
             return result
         }
+        index = endOfTrailingPreviewClosures(text, from: index)
     }
     result.append(contentsOf: text[index...])
     return result
+}
+
+/// Widget previews are `#Preview(...) { widget } timeline: { entries }`.
+/// The first brace is only the widget. The labeled closure is still the macro.
+private func endOfTrailingPreviewClosures(_ text: String, from start: String.Index) -> String.Index {
+    var index = start
+    while true {
+        let saved = index
+        index = skipPreviewSpace(text, from: index)
+        guard let nameEnd = previewIdentifierEnd(text, from: index) else { return saved }
+        var cursor = skipPreviewSpace(text, from: nameEnd)
+        guard cursor < text.endIndex, text[cursor] == ":" else { return saved }
+        cursor = skipPreviewSpace(text, from: text.index(after: cursor))
+        guard cursor < text.endIndex, text[cursor] == "{" else { return saved }
+        var depth = 0
+        var closed = false
+        while cursor < text.endIndex {
+            let character = text[cursor]
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    index = text.index(after: cursor)
+                    closed = true
+                    break
+                }
+            }
+            cursor = text.index(after: cursor)
+        }
+        if !closed { return saved }
+    }
+}
+
+private func skipPreviewSpace(_ text: String, from index: String.Index) -> String.Index {
+    var cursor = index
+    while cursor < text.endIndex, text[cursor] == " " || text[cursor] == "\n" || text[cursor] == "\t" || text[cursor] == "\r" {
+        cursor = text.index(after: cursor)
+    }
+    return cursor
+}
+
+private func previewIdentifierEnd(_ text: String, from index: String.Index) -> String.Index? {
+    guard index < text.endIndex, text[index].isLetter || text[index] == "_" else { return nil }
+    var cursor = text.index(after: index)
+    while cursor < text.endIndex, text[cursor].isLetter || text[cursor].isNumber || text[cursor] == "_" {
+        cursor = text.index(after: cursor)
+    }
+    return cursor
 }
 
 private func dropPreviewAttributes(_ text: String) -> String {
@@ -1041,6 +1707,9 @@ private func makePackageUnit(_ declaration: PackageDeclaration, packageRoot: URL
         umbrellaHeader: umbrella,
         publicHeaders: publicHeaders,
         dependencies: declaration.dependencies,
+        linkDependencies: declaration.dependencies,
+        linkLibraries: declaration.linkLibraries,
+        linkFrameworks: declaration.linkFrameworks,
         defines: declaration.defines,
         isTest: declaration.isTest,
         swiftVersion: "5"
@@ -1214,6 +1883,8 @@ private struct PackageDeclaration {
     var publicHeadersPath: String?
     var headerSearchPaths: [String]
     var defines: [String]
+    var linkLibraries: [String]
+    var linkFrameworks: [String]
 }
 
 private struct PackageManifest {
@@ -1274,6 +1945,8 @@ private func declaration(in block: [String], isTest: Bool, constants: [String: S
     var sourceEntries: [String] = []
     var excludes: [String] = []
     var defines: [String] = []
+    var linkLibraries: [String] = []
+    var linkFrameworks: [String] = []
     var collectingSources = false
     var collectingExcludes = false
     var sawName = false
@@ -1285,6 +1958,12 @@ private func declaration(in block: [String], isTest: Bool, constants: [String: S
             dependencies.append(dependency)
         } else if sawName, line.contains("name:"), let dependency = firstMatch(#"name:\s*"([^"]+)""#, in: line) {
             dependencies.append(dependency)
+        }
+        if linksOnIOS(line), let library = firstMatch(#"linkedLibrary\(\s*"([^"]+)""#, in: line) {
+            linkLibraries.append(library)
+        }
+        if linksOnIOS(line), let framework = firstMatch(#"linkedFramework\(\s*"([^"]+)""#, in: line) {
+            linkFrameworks.append(framework)
         }
         if let define = firstMatch(#"define\(\s*"([^"]+)""#, in: line) {
             if let literal = firstMatch(#"to:\s*"([^"]+)""#, in: line) {
@@ -1325,8 +2004,45 @@ private func declaration(in block: [String], isTest: Bool, constants: [String: S
         excludes: excludes,
         publicHeadersPath: firstMatch(#"publicHeadersPath:\s*"([^"]+)""#, in: window),
         headerSearchPaths: allMatches(#"headerSearchPath\(\s*"([^"]+)""#, in: window),
-        defines: defines
+        defines: defines,
+        linkLibraries: linkLibraries,
+        linkFrameworks: linkFrameworks
     )
+}
+
+private func linksOnIOS(_ line: String) -> Bool {
+    guard line.contains(".when(platforms:") else { return true }
+    return line.contains(".iOS")
+}
+
+private func frameworkNames(in searchPaths: [String]) -> Set<String> {
+    var names = Set<String>()
+    for path in searchPaths {
+        guard let children = try? FileManager.default.contentsOfDirectory(atPath: path) else { continue }
+        for child in children where child.hasSuffix(".framework") {
+            names.insert(String(child.dropLast(".framework".count)))
+        }
+    }
+    return names
+}
+
+private func packageLinkExtras(from packages: [PackageUnit], frameworksOnDisk: Set<String>, alreadyLinked: Set<String>) -> (frameworks: [String], libraries: [String]) {
+    var frameworks: [String] = []
+    var libraries: [String] = []
+    var seenFrameworks = alreadyLinked
+    var seenLibraries = Set<String>()
+    for package in packages {
+        for library in package.linkLibraries where seenLibraries.insert(library).inserted {
+            libraries.append(library)
+        }
+        for framework in package.linkFrameworks where seenFrameworks.insert(framework).inserted {
+            frameworks.append(framework)
+        }
+        for dependency in package.linkDependencies where frameworksOnDisk.contains(dependency) && seenFrameworks.insert(dependency).inserted {
+            frameworks.append(dependency)
+        }
+    }
+    return (frameworks, libraries)
 }
 
 private func stringConstants(in text: String) -> [String: String] {

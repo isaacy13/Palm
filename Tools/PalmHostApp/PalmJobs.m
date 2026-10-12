@@ -6,6 +6,10 @@
 + (instancetype)jobWithType:(MDKJobType)type withArguments:(NSArray<NSString *> *)arguments;
 @end
 
+MDKJob *PalmJob(MDKJobType type, NSArray<NSString *> *arguments, NSArray<NSURL *> *inputs, NSURL *output) {
+    return [MDKJob jobWithType:type withArguments:arguments withInputFileURLs:inputs withOutputFileURL:output];
+}
+
 MDKJob *PalmLinkerJob(NSArray<NSString *> *arguments) {
-    return [MDKJob jobWithType:MDKJobTypeLinker withArguments:arguments];
+    return PalmJob(MDKJobTypeLinker, arguments, @[], nil);
 }

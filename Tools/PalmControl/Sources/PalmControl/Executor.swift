@@ -2,6 +2,31 @@
 
 import Foundation
 
+/// Swift jobs leave the output URL empty and keep the object path after `-o`.
+public func emittedObjectPath(arguments: [String], outputFilePath: String?) -> String? {
+    if let outputFilePath, outputFilePath.hasSuffix(".o") {
+        return outputFilePath
+    }
+    guard let index = arguments.lastIndex(of: "-o"), index + 1 < arguments.count else { return nil }
+    let path = arguments[index + 1]
+    return path.hasSuffix(".o") ? path : nil
+}
+
+/// Swift package jobs compile one object per file under tmp. The planned
+/// `Module.o` path is never written. Link the objects that were actually
+/// emitted, and skip any the driver link job already names.
+public func objectFilesToLink(compiled: [String], planned: [String], alreadyLinked: Set<String>, fileExists: (String) -> Bool) -> [String] {
+    var seen = alreadyLinked
+    var result: [String] = []
+    for path in compiled where path.hasSuffix(".o") && seen.insert(path).inserted {
+        result.append(path)
+    }
+    for path in planned where path.hasSuffix(".o") && fileExists(path) && seen.insert(path).inserted {
+        result.append(path)
+    }
+    return result
+}
+
 public protocol DeviceToolchain {
     func pull(_ request: ControlRequest, log: ControlLog) throws
     func compile(_ plan: BuildPlan, log: ControlLog) throws
@@ -138,11 +163,53 @@ public struct MacAgent {
 }
 
 public enum AgentDeviceRunner {
+    /// Physical device that built the app. Set `PALM_DEVICE_UDID` when more than one iOS device is visible.
+    static var deviceUDID = ProcessInfo.processInfo.environment["PALM_DEVICE_UDID"]
+    static var command: ([String]) throws -> (Int32, String) = { arguments in
+        try CommandRunner.run(executable: "/usr/bin/env", arguments: ["agent-device"] + arguments, currentDirectory: nil)
+    }
+
     public static func run(process: RunningProcess, checks: [UICheck]) throws -> String {
-        var lines = ["ui open \(process.bundleIdentifier) pid \(process.pid)"]
+        var lines: [String] = []
+        // open without --relaunch keeps the process the phone already launched.
+        lines.append(try invoke(["open", process.bundleIdentifier, "--foreground"] + deviceFlags()))
         for check in checks {
-            lines.append("ui \(check.action) \(check.name)")
+            guard let checkArguments = arguments(for: check) else {
+                throw ControlError.testFailed("unknown ui action \(check.action)")
+            }
+            lines.append(try invoke(checkArguments + deviceFlags()))
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    static func arguments(for check: UICheck) -> [String]? {
+        switch check.action {
+        case "snapshot":
+            return check.name.isEmpty ? ["snapshot", "-i"] : ["snapshot", "-i", "--scope", check.name]
+        case "wait":
+            return ["wait", "text", check.name]
+        case "press":
+            return ["press", check.name, "--settle"]
+        case "click":
+            return ["click", check.name, "--settle"]
+        default:
+            return nil
+        }
+    }
+
+    private static func deviceFlags() -> [String] {
+        var flags = ["--platform", "ios"]
+        if let deviceUDID, !deviceUDID.isEmpty {
+            flags.append(contentsOf: ["--udid", deviceUDID])
+        }
+        return flags
+    }
+
+    private static func invoke(_ arguments: [String]) throws -> String {
+        let result = try command(arguments)
+        guard result.0 == 0 else {
+            throw ControlError.testFailed(result.1.isEmpty ? "agent-device \(arguments.joined(separator: " ")) failed" : result.1)
+        }
+        return result.1
     }
 }

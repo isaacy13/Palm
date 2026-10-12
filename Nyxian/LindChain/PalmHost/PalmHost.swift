@@ -8,8 +8,38 @@ import MobileDevelopmentKit
 /// NXT2 signer. Launch uses the existing process manager when it is loaded.
 final class NyxianToolchain: DeviceToolchain {
     private var linkJobs: [MDKJob] = []
+    private var compiledObjects: [String] = []
 
     func pull(_ request: ControlRequest, log: ControlLog) throws {}
+
+    /// CoreCompiler names its driver "swiftc", so generated jobs look for
+    /// `lib/swift/host` relative to that name. Point those flags at Documents/swift.
+    private func withAbsolutePlugins(_ arguments: [String], home: URL) -> [String] {
+        let host = home.appendingPathComponent("Documents/swift/host")
+        let server = host.appendingPathComponent("libSwiftInProcPluginServer.dylib").path
+        let plugins = host.appendingPathComponent("plugins").path
+        var rewritten: [String] = []
+        var index = 0
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "-in-process-plugin-server-path", index + 1 < arguments.count {
+                rewritten.append(argument)
+                rewritten.append(server)
+                index += 2
+                continue
+            }
+            if argument == "-plugin-path", index + 1 < arguments.count {
+                rewritten.append(argument)
+                let next = arguments[index + 1]
+                rewritten.append(next.hasPrefix("/") ? next : plugins)
+                index += 2
+                continue
+            }
+            rewritten.append(argument)
+            index += 1
+        }
+        return rewritten
+    }
 
     func compile(_ plan: BuildPlan, log: ControlLog) throws {
         let home = URL(fileURLWithPath: "/private" + NSHomeDirectory())
@@ -22,6 +52,7 @@ final class NyxianToolchain: DeviceToolchain {
             }
         }
         linkJobs.removeAll()
+        compiledObjects.removeAll()
         let output = URL(fileURLWithPath: plan.linkJob.output)
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         for job in plan.compileJobs {
@@ -39,10 +70,15 @@ final class NyxianToolchain: DeviceToolchain {
                     log.append("deferred \(item.type.rawValue) \(item.arguments.joined(separator: " "))")
                     continue
                 }
-                log.append("run \(item.type.rawValue) \(item.arguments.joined(separator: " "))")
-                let primary = frontendPrimary(item.arguments)
-                NSLog("palm run %@ %@ %@", "\(item.type.rawValue)", job.moduleName, primary)
-                try execute(item, log: log, stage: "compile")
+                let absolute = withAbsolutePlugins(item.baseArguments, home: home)
+                let runnable = PalmJob(item.type, absolute, item.inputFileURLs, item.outputFileURL) ?? item
+                log.append("run \(runnable.type.rawValue) \(runnable.arguments.joined(separator: " "))")
+                let primary = frontendPrimary(runnable.arguments)
+                NSLog("palm run %@ %@ %@", "\(runnable.type.rawValue)", job.moduleName, primary)
+                try execute(runnable, log: log, stage: "compile")
+                if let path = emittedObjectPath(arguments: runnable.arguments, outputFilePath: runnable.outputFileURL?.path) {
+                    compiledObjects.append(path)
+                }
             }
         }
     }
@@ -52,7 +88,14 @@ final class NyxianToolchain: DeviceToolchain {
         if jobs.isEmpty {
             throw ControlError.linkFailed("compiler driver emitted no linker job for \(plan.linkJob.output)")
         }
-        let objects = plan.linkJob.arguments.filter { $0.hasSuffix(".o") }
+        let alreadyLinked = Set((linkJobs + jobs).flatMap(\.arguments).filter { $0.hasSuffix(".o") })
+        let objects = objectFilesToLink(
+            compiled: compiledObjects,
+            planned: plan.linkJob.arguments,
+            alreadyLinked: alreadyLinked,
+            fileExists: { FileManager.default.fileExists(atPath: $0) }
+        )
+        log.append("link objects \(objects.count)")
         for item in jobs {
             let linked = item.type == .linker ? (PalmLinkerJob(item.arguments + objects) ?? item) : item
             log.append("link job \(linked.type.rawValue) \(linked.arguments.joined(separator: " "))")
@@ -62,6 +105,10 @@ final class NyxianToolchain: DeviceToolchain {
             throw ControlError.linkFailed("linker produced no \(plan.linkJob.output)")
         }
         log.append("linked \(plan.linkJob.output)")
+        let copied = try ProjectDriver().copyBundleResources(plan.bundleResources, nextTo: plan.linkJob.output)
+        if !copied.isEmpty {
+            log.append("bundle resources \(copied.joined(separator: " "))")
+        }
     }
 
     /// Swift's legacy driver emits a clang driver job for the link. Nyxian's
@@ -154,7 +201,7 @@ final class NyxianToolchain: DeviceToolchain {
 
     private func writeBundleInfo(_ plan: BuildPlan, bundle: URL) throws {
         let name = bundle.deletingPathExtension().lastPathComponent
-        let info: [String: Any] = [
+        var info: [String: Any] = [
             "CFBundleIdentifier": plan.bundleIdentifier,
             "CFBundleExecutable": name,
             "CFBundleName": name,
@@ -167,6 +214,11 @@ final class NyxianToolchain: DeviceToolchain {
                 "UIApplicationSupportsMultipleScenes": false,
             ],
         ]
+        for (key, value) in plan.infoPlist {
+            info[key] = value.propertyListObject
+        }
+        info["CFBundleIdentifier"] = plan.bundleIdentifier
+        info["CFBundleExecutable"] = name
         let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try data.write(to: bundle.appendingPathComponent("Info.plist"))
     }
@@ -227,15 +279,44 @@ final class PalmControlHost {
     private var server: ControlServer?
     private let port: UInt16 = 8741
 
+    /// Load the in-process plugin server on the main thread before any compile.
+    /// The compiler calls it from a background queue, and the first call deadlocks
+    /// unless this image is already mapped and its main-actor entry has run.
+    private func preloadPluginServer(home: URL) {
+        let path = home.appendingPathComponent("Documents/swift/host/libSwiftInProcPluginServer.dylib").path
+        guard let handle = dlopen(path, RTLD_NOW | RTLD_LOCAL) else {
+            let reason = dlerror().map { String(cString: $0) } ?? "unknown"
+            NSLog("palm plugin server %@", reason)
+            return
+        }
+        guard let symbol = dlsym(handle, "swift_inproc_plugins_handle_message") else {
+            NSLog("palm plugin server missing entry")
+            return
+        }
+        typealias Entry = @convention(c) (
+            UnsafePointer<UInt8>?, Int,
+            UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>?,
+            UnsafeMutablePointer<Int>?
+        ) -> Bool
+        let entry = unsafeBitCast(symbol, to: Entry.self)
+        var byte: UInt8 = 0
+        var out: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        _ = entry(&byte, 0, &out, &length)
+        NSLog("palm plugin server ready")
+    }
+
     func start() {
         if server != nil { return }
         let home = URL(fileURLWithPath: "/private" + NSHomeDirectory())
         var context = DriverContext.nyxianDocuments(home: home)
-        // The linked CoreCompiler is Nyxian 0.11.4's Swift 6.3.3. The 27.0 SDK
-        // swiftinterface is Swift 6.4, so this host uses the 26.5 slice.
+        // CoreCompiler is the Swift 6.4 toolchain. iOS 27 SwiftUICore implements
+        // @State with the SwiftUIMacros plugin, which ships only as a macOS dylib.
+        // The 26.5 slice still declares State as a property wrapper, and 6.4 can load it.
         context.sdkRoot = home.appendingPathComponent("Documents/SDK/iPhoneOS26.5.sdk")
         let sourceRoot = home.appendingPathComponent("Documents/Projects")
         let executor = ControlExecutor(toolchain: NyxianToolchain(), sourceRoot: sourceRoot, context: context)
+        preloadPluginServer(home: home)
         let server = ControlServer { executor.run($0) }
         do {
             let bound = try server.start(port: port)

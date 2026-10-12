@@ -4,6 +4,168 @@ import XCTest
 @testable import PalmControl
 
 final class ControlTests: XCTestCase {
+    func testPreviewStripKeepsMembersMentionedBesideTheMacroName() {
+        let source = """
+        /// Stable default so `#Preview` does not mint a new UUID.
+        static let idleSavedPlaceLocationsRevision = UUID()
+
+        #Preview {
+            Text("Hi")
+        }
+        """
+        let stripped = stripPreviewBlocks(source)
+        XCTAssertTrue(stripped.contains("/// Stable default so `#Preview` does not mint a new UUID."))
+        XCTAssertTrue(stripped.contains("idleSavedPlaceLocationsRevision"))
+        XCTAssertFalse(stripped.contains("Text(\"Hi\")"))
+    }
+
+    func testPreviewStripRemovesWidgetTimelineClosures() {
+        let source = """
+        struct SleepVitalsWidget {}
+        #Preview("Sleep", as: .systemMedium) { SleepVitalsWidget() } timeline: {
+            VitalsWidgetEntry(date: .now, vitals: .widgetPreview)
+        }
+        struct KeptAfterPreview {}
+        """
+        let stripped = stripPreviewBlocks(source)
+        XCTAssertTrue(stripped.contains("struct SleepVitalsWidget {}"))
+        XCTAssertTrue(stripped.contains("struct KeptAfterPreview {}"))
+        XCTAssertFalse(stripped.contains("VitalsWidgetEntry"))
+        XCTAssertFalse(stripped.contains("timeline:"))
+        XCTAssertFalse(stripped.contains("#Preview"))
+    }
+
+    func testPreviewStripKeepsGuideAISourcesBalanced() throws {
+        let root = URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI")
+        var seen = 0
+        guard let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+            XCTFail("missing GuideAI sources")
+            return
+        }
+        for case let url as URL in files {
+            guard url.pathExtension == "swift" else { continue }
+            let text = try String(contentsOf: url, encoding: .utf8)
+            guard text.contains("#Preview") else { continue }
+            seen += 1
+            let stripped = stripPreviewBlocks(text)
+            XCTAssertEqual(braceDepth(stripped), 0, url.lastPathComponent)
+            for line in stripped.split(separator: "\n") where line.contains("#Preview") {
+                XCTAssertTrue(line.contains("//"), "\(url.lastPathComponent): \(line)")
+            }
+        }
+        XCTAssertGreaterThan(seen, 20)
+    }
+
+    func testGenerableExpansionMatchesFoundationModelsMacro() throws {
+        let source = """
+        import FoundationModels
+
+        struct SampleTool {
+            @Generable
+            struct Arguments {
+                @Guide(description: "day count", .range(1...10))
+                let dayCount: Int
+            }
+        }
+
+        @Generable
+        struct SampleDate: Equatable {
+            @Guide(description: "Four-digit year.", .range(1...4000))
+            let year: Int
+            @Guide(description: "Optional place")
+            let place: String?
+            func kept() -> Int { year }
+        }
+        """
+        let expanded = expandGenerableMacros(source)
+        XCTAssertFalse(expanded.contains("@Generable"))
+        XCTAssertFalse(expanded.contains("@Guide"))
+        XCTAssertTrue(expanded.contains("let dayCount: Int"))
+        XCTAssertTrue(expanded.contains("let year: Int"))
+        XCTAssertTrue(expanded.contains("func kept() -> Int { year }"))
+        XCTAssertTrue(expanded.contains("extension SampleTool.Arguments: nonisolated FoundationModels.Generable"))
+        XCTAssertTrue(expanded.contains("extension SampleDate: nonisolated FoundationModels.Generable"))
+        XCTAssertTrue(expanded.contains("name: \"year\", description: \"Four-digit year.\", type: Int.self, guides: [.range(1...4000)]"))
+        XCTAssertTrue(expanded.contains("name: \"place\", description: \"Optional place\", type: String?.self"))
+        XCTAssertTrue(expanded.contains("var place: String?.PartiallyGenerated?"))
+        XCTAssertTrue(expanded.contains("ConvertibleFromGeneratedContent, Equatable"))
+        let sampleDate = try XCTUnwrap(expanded.range(of: "struct SampleDate"))
+        XCTAssertFalse(expanded[..<sampleDate.lowerBound].contains("extension SampleTool"))
+    }
+
+    func testGenerableExpansionOfGuideAISourcesKeepsStoredPropertiesOnly() throws {
+        let roots = [
+            URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI"),
+            URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAIUnitTests"),
+        ]
+        var seen = 0
+        for root in roots {
+            guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else {
+                XCTFail("GuideAI sources are missing")
+                return
+            }
+            for case let url as URL in enumerator {
+                guard url.pathExtension == "swift" else { continue }
+                let source = try String(contentsOf: url, encoding: .utf8)
+                guard source.contains("@Generable") else { continue }
+                seen += 1
+                let expanded = expandGenerableMacros(source)
+                XCTAssertTrue(codeLines(expanded, containing: "@Generable").isEmpty, url.lastPathComponent)
+                XCTAssertTrue(codeLines(expanded, containing: "@Guide").isEmpty, url.lastPathComponent)
+                XCTAssertEqual(braceDepth(expanded), 0, url.lastPathComponent)
+                if url.lastPathComponent == "GenerableDate.swift" {
+                    XCTAssertFalse(expanded.contains("forProperty: \"coord\""))
+                    XCTAssertTrue(expanded.contains("func fetchTimeZone"))
+                    XCTAssertTrue(expanded.contains("forProperty: \"minute\""))
+                }
+            }
+        }
+        XCTAssertGreaterThan(seen, 4)
+    }
+
+    func testCompiledDataModelIsCopiedBesideTheExecutable() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("palm-model-\(UUID().uuidString)")
+        let model = root.appendingPathComponent("GuideAI.xcdatamodeld")
+        let compiled = root.appendingPathComponent("GuideAI.momd")
+        try FileManager.default.createDirectory(at: model, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: compiled, withIntermediateDirectories: true)
+        try Data("model".utf8).write(to: compiled.appendingPathComponent("GuideAI.mom"))
+        let found = ProjectDriver().compiledDataModels(under: root)
+        XCTAssertEqual(
+            found.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+            [compiled.resolvingSymlinksInPath().path]
+        )
+        let executable = root.appendingPathComponent("GuideAI.app/GuideAI").path
+        let copied = try ProjectDriver().copyBundleResources(found, nextTo: executable)
+        XCTAssertEqual(copied, ["GuideAI.momd"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("GuideAI.app/GuideAI.momd/GuideAI.mom").path))
+    }
+
+    func testSwiftJobsRecordTheObjectPathAfterTheOutputFlag() {
+        XCTAssertEqual(
+            emittedObjectPath(arguments: ["-frontend", "-c", "-o", "/tmp/A-111.o", "A.swift"], outputFilePath: nil),
+            "/tmp/A-111.o"
+        )
+        XCTAssertEqual(
+            emittedObjectPath(arguments: ["-o", "/tmp/App"], outputFilePath: nil),
+            nil
+        )
+        XCTAssertEqual(
+            emittedObjectPath(arguments: ["-o", "/tmp/ignored.o"], outputFilePath: "/tmp/Cache/Foo-0.o"),
+            "/tmp/Cache/Foo-0.o"
+        )
+    }
+
+    func testLinkUsesEmittedObjectsInsteadOfTheUnwrittenModuleObject() {
+        let objects = objectFilesToLink(
+            compiled: ["/tmp/A-111.o", "/tmp/Cache/Foo-0.o"],
+            planned: ["/tmp/Cache/Lottie.o", "/tmp/Cache/Foo-0.o"],
+            alreadyLinked: ["/tmp/App-1.o"],
+            fileExists: { $0 == "/tmp/Cache/Foo-0.o" }
+        )
+        XCTAssertEqual(objects, ["/tmp/A-111.o", "/tmp/Cache/Foo-0.o"])
+    }
+
     func testThreeRequestsStayInsideTheirStages() throws {
         let fixture = fixtureRoot()
         let context = try makeContext()
@@ -112,6 +274,30 @@ final class ControlTests: XCTestCase {
         XCTAssertFalse(buildAgain.logs.contains("ui snapshot home"))
     }
 
+    func testAgentDeviceRunnerOpensTheLaunchedAppAndChecksIt() throws {
+        let previousCommand = AgentDeviceRunner.command
+        let previousDevice = AgentDeviceRunner.deviceUDID
+        defer {
+            AgentDeviceRunner.command = previousCommand
+            AgentDeviceRunner.deviceUDID = previousDevice
+        }
+        var calls: [[String]] = []
+        AgentDeviceRunner.deviceUDID = "00008150-000A70980EA0C01C"
+        AgentDeviceRunner.command = { arguments in
+            calls.append(arguments)
+            return (0, "ran \(arguments[0])\n")
+        }
+        let process = RunningProcess(pid: 42, bundleIdentifier: "com.onexengineering.GuideAI", executablePath: "/tmp/GuideAI")
+        let log = try AgentDeviceRunner.run(process: process, checks: [UICheck(name: "home", action: "snapshot")])
+        XCTAssertEqual(calls, [
+            ["open", "com.onexengineering.GuideAI", "--foreground", "--platform", "ios", "--udid", "00008150-000A70980EA0C01C"],
+            ["snapshot", "-i", "--scope", "home", "--platform", "ios", "--udid", "00008150-000A70980EA0C01C"],
+        ])
+        XCTAssertFalse(calls[0].contains("--relaunch"))
+        XCTAssertTrue(log.contains("ran open"))
+        XCTAssertTrue(log.contains("ran snapshot"))
+    }
+
     func testGuideAIPlanExposesFrameworksAndStopsBeforeLaunch() throws {
         let project = URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI.xcodeproj")
         XCTAssertTrue(FileManager.default.fileExists(atPath: project.path))
@@ -128,6 +314,17 @@ final class ControlTests: XCTestCase {
         try FileManager.default.createDirectory(at: interfaceDirectory, withIntermediateDirectories: true)
         let mapInterface = interfaceDirectory.appendingPathComponent("arm64e-apple-ios.swiftinterface")
         try "public struct MapFeature {}\n".write(to: mapInterface, atomically: true, encoding: .utf8)
+        let transcriptDirectory = context.sdkRoot.appendingPathComponent("System/Library/Frameworks/FoundationModels.framework/Modules/FoundationModels.swiftmodule")
+        try FileManager.default.createDirectory(at: transcriptDirectory, withIntermediateDirectories: true)
+        let transcriptInterface = transcriptDirectory.appendingPathComponent("arm64e-apple-ios.swiftinterface")
+        try """
+        public struct Transcript {
+          public enum Entry {
+            case response(FoundationModels.Transcript.Response)
+          }
+          public static func == (a: FoundationModels.Transcript, b: FoundationModels.Transcript) -> Swift.Bool
+        }
+        """.write(to: transcriptInterface, atomically: true, encoding: .utf8)
         let driver = ProjectDriver()
         let build = try driver.plan(project: project, target: "GuideAI", kind: .build, tests: ["Ignored"], context: context)
         XCTAssertEqual(build.bundleIdentifier, "com.onexengineering.GuideAI")
@@ -141,6 +338,16 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(build.linkedFrameworks.contains("HealthKit"))
         XCTAssertTrue(build.entitlementKeys.contains("com.apple.developer.healthkit"))
         XCTAssertTrue(build.entitlementKeys.contains("com.apple.developer.weatherkit"))
+        XCTAssertEqual(
+            build.infoPlist["NSHealthShareUsageDescription"],
+            .string("GuideAI shows the health information you choose to share, including activity, sleep, nutrition, mood, medications, and measurements.")
+        )
+        XCTAssertEqual(
+            build.infoPlist["NSLocationWhenInUseUsageDescription"],
+            .string("Guide uses your location to suggest nearby destinations")
+        )
+        XCTAssertFalse(plistText(build.infoPlist).contains("$(PRODUCT_MODULE_NAME)"))
+        XCTAssertTrue(plistText(build.infoPlist).contains("GuideAI.CarPlaySceneDelegate"))
         XCTAssertTrue(build.localPackages.contains("GuideAIMobilityCore"))
         XCTAssertTrue(build.localPackages.contains("Toasts"))
         XCTAssertTrue(build.localPackages.contains("WindowOverlay"))
@@ -157,6 +364,13 @@ final class ControlTests: XCTestCase {
         })
         XCTAssertTrue(build.compileJobs.contains { $0.arguments.contains { $0.contains("CLiteRTLM.xcframework/ios-arm64") } })
         XCTAssertTrue(build.linkJob.arguments.contains { $0.contains("FirebaseAnalytics.xcframework/ios-arm64") })
+        XCTAssertTrue(build.linkJob.arguments.contains("-lsqlite3"))
+        XCTAssertTrue(build.linkJob.arguments.contains("-lc++"))
+        XCTAssertTrue(build.linkJob.arguments.contains("-lz"))
+        XCTAssertTrue(build.linkJob.arguments.contains("StoreKit"))
+        let guideLinkArguments = build.compileJobs.first { $0.moduleName == "GuideAI" }?.arguments ?? []
+        XCTAssertTrue(guideLinkArguments.contains("-lsqlite3"))
+        XCTAssertTrue(guideLinkArguments.contains("StoreKit"))
         XCTAssertFalse(build.compileJobs.contains { $0.sources.contains { $0.hasSuffix("ToolTests.swift") } })
         XCTAssertFalse(build.compileJobs.contains { $0.sources.contains { $0.hasSuffix("Package.swift") } })
         XCTAssertFalse(build.compileJobs.contains { $0.sources.contains { $0.contains("InterfaceController.swift") } })
@@ -197,10 +411,23 @@ final class ControlTests: XCTestCase {
         })
         XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.sources.contains { $0.contains("ExperimentalFlags.swift") } }), "5")
         XCTAssertEqual(swiftLanguageMode(build.compileJobs.first { $0.moduleName == "Toasts" }), "6")
+        let policy = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("CatalogSavedPlaceMapOverlayPolicy") }
+        let policyText = try String(contentsOfFile: try XCTUnwrap(policy))
+        XCTAssertTrue(policyText.contains("enum CatalogSavedPlaceMapOverlayPolicy"))
+        XCTAssertTrue(policyText.contains("dedicatedMarkerCategoryIDs"))
+        XCTAssertTrue(policyText.contains("idleSavedPlaceLocationsRevision"))
+        let generable = build.compileJobs.first { $0.moduleName == "GuideAI" }?.sources.first { $0.contains("GenerableDate") }
+        let generableText = try String(contentsOfFile: try XCTUnwrap(generable))
+        XCTAssertFalse(generableText.contains("@Generable"))
+        XCTAssertFalse(generableText.contains("@Guide"))
+        XCTAssertTrue(generableText.contains("let year: Int"))
+        XCTAssertTrue(generableText.contains("extension GenerableDate: nonisolated FoundationModels.Generable"))
+        XCTAssertTrue(generableText.contains("description: \"Four-digit Gregorian year. Example: 2025. Use the user's intended year.\""))
         let guideArguments = build.compileJobs.first { $0.moduleName == "GuideAI" }?.arguments ?? []
         XCTAssertTrue(guideArguments.contains("-default-isolation"))
         XCTAssertTrue(guideArguments.contains("MainActor"))
         XCTAssertTrue(guideArguments.contains("MemberImportVisibility"))
+        XCTAssertTrue(guideArguments.contains { $0.hasSuffix("host/libSwiftInProcPluginServer.dylib") })
         XCTAssertTrue(guideArguments.contains { $0.hasSuffix("host/plugins") })
         XCTAssertTrue(build.compileJobs.contains { job in
             job.moduleName == "Lottie" && job.sources.contains { $0.hasSuffix("EpoxyCore/Views/ViewType.swift") }
@@ -233,9 +460,13 @@ final class ControlTests: XCTestCase {
         XCTAssertFalse(chartsText.contains("@Entry"))
         XCTAssertTrue(chartsText.contains("struct __Key_weatherChartEmbedded: EnvironmentKey"))
         XCTAssertTrue(chartsText.contains("struct __Key_weatherChartPlotHeight: EnvironmentKey"))
+        XCTAssertEqual(braceDepth(chartsText), 0)
         let repairedInterface = try String(contentsOf: mapInterface, encoding: .utf8)
         XCTAssertTrue(repairedInterface.contains("public struct MapCamera :"))
         XCTAssertTrue(repairedInterface.contains("public struct MapCameraPosition :"))
+        let repairedTranscript = try String(contentsOf: transcriptInterface, encoding: .utf8)
+        XCTAssertTrue(repairedTranscript.contains("case reasoning(FoundationModels.Transcript.Reasoning)"))
+        XCTAssertTrue(repairedTranscript.contains("public struct Reasoning :"))
         XCTAssertTrue(build.compileJobs.contains { $0.tool == "swiftc" && $0.arguments.contains("1000000") })
         let moduleOrder = build.compileJobs.map(\.moduleName)
         if let promises = moduleOrder.firstIndex(of: "Promises"), let sessions = moduleOrder.firstIndex(of: "FirebaseSessions") {
@@ -314,6 +545,54 @@ private final class RecordingToolchain: DeviceToolchain {
 private func swiftLanguageMode(_ job: CompilerJob?) -> String? {
     guard let job, let index = job.arguments.firstIndex(of: "-swift-version"), index + 1 < job.arguments.count else { return nil }
     return job.arguments[index + 1]
+}
+
+private func codeLines(_ text: String, containing token: String) -> [String] {
+    text.split(separator: "\n").compactMap { line in
+        guard let range = line.range(of: token) else { return nil }
+        if line[..<range.lowerBound].contains("//") { return nil }
+        return String(line)
+    }
+}
+
+private func plistText(_ value: [String: PlistValue]) -> String {
+    func walk(_ item: PlistValue) -> String {
+        switch item {
+        case .string(let text):
+            return text
+        case .array(let values):
+            return values.map(walk).joined(separator: " ")
+        case .dictionary(let values):
+            return values.values.map(walk).joined(separator: " ")
+        default:
+            return ""
+        }
+    }
+    return value.values.map(walk).joined(separator: " ")
+}
+
+private func braceDepth(_ text: String) -> Int {
+    var depth = 0
+    var index = text.startIndex
+    while index < text.endIndex {
+        if text[index] == "/" && text.index(after: index) < text.endIndex && text[text.index(after: index)] == "/" {
+            index = text[index...].firstIndex(of: "\n") ?? text.endIndex
+            continue
+        }
+        if text[index] == "\"" {
+            index = text.index(after: index)
+            while index < text.endIndex && text[index] != "\"" && text[index] != "\n" {
+                if text[index] == "\\" { index = text.index(after: index) }
+                if index < text.endIndex { index = text.index(after: index) }
+            }
+            if index < text.endIndex { index = text.index(after: index) }
+            continue
+        }
+        if text[index] == "{" { depth += 1 }
+        if text[index] == "}" { depth -= 1 }
+        index = text.index(after: index)
+    }
+    return depth
 }
 
 private func fixtureRoot() -> URL {
