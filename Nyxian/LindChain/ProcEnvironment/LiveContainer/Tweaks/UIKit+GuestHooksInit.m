@@ -27,6 +27,8 @@
 #import <LocalAuthentication/LocalAuthentication.h>
 #import <LindChain/Utils/Swizzle.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
+#import <dlfcn.h>
 
 // Handler for AppDelegate
 @implementation UIApplication(LiveContainerHook)
@@ -142,6 +144,88 @@
 
 @end
 
+@implementation NSObject (PalmLocalStore)
+
+- (void)palm_ignoreCloudKitContainerOptions:(id)options
+{
+}
+
++ (id)palm_containerWithIdentifier:(NSString *)identifier
+{
+    /*
+     CKContainer's real initializer traps when the process has no iCloud
+     entitlement. GuideAI only needs accountStatus(), which then stays unavailable.
+     */
+    (void)identifier;
+    id container = [self alloc];
+    CFRetain((__bridge CFTypeRef)container);
+    return container;
+}
+
+- (void)palm_accountStatusWithCompletionHandler:(void (^)(NSInteger status, NSError *error))handler
+{
+    if (handler != nil) {
+        handler(3, nil);
+    }
+}
+
+- (void)palm_loadLocalStores:(void (^)(id description, NSError *error))block
+{
+    /*
+     GuideAI waits on this completion before UIApplication starts the run loop.
+     The stock loader hops to the main queue, so that wait never returns.
+     Add the local store and finish the completion on this thread.
+     */
+    id description = nil;
+    @try {
+        NSArray *descriptions = [self valueForKey:@"persistentStoreDescriptions"];
+        description = descriptions.firstObject;
+        id coordinator = [self valueForKey:@"persistentStoreCoordinator"];
+        NSURL *url = [description valueForKey:@"URL"];
+        SEL add = @selector(addPersistentStoreWithType:configuration:URL:options:error:);
+        if (coordinator != nil && url != nil && [coordinator respondsToSelector:add]) {
+            NSError *error = nil;
+            NSDictionary *options = @{
+                @"NSMigratePersistentStoresAutomaticallyOption": @YES,
+                @"NSInferMappingModelAutomaticallyOption": @YES,
+            };
+            ((id (*)(id, SEL, id, id, id, id, NSError **))objc_msgSend)(
+                coordinator, add, @"SQLite", nil, url, options, &error);
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+    }
+    if (block != nil) {
+        block(description, nil);
+    }
+}
+
+- (NSArray *)palm_executeFetchRequest:(id)request error:(NSError **)error
+{
+    @try {
+        return [self palm_executeFetchRequest:request error:error];
+    } @catch (NSException *exception) {
+        NSString *note = [NSString stringWithFormat:@"fetch exception %@ %@\n", exception.name, exception.reason];
+        NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"boot/fetch-exception.txt"];
+        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (handle == nil) {
+            [note writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } else {
+            [handle seekToEndOfFile];
+            [handle writeData:[note dataUsingEncoding:NSUTF8StringEncoding]];
+            [handle closeFile];
+        }
+        if (error != NULL) {
+            *error = [NSError errorWithDomain:exception.name ?: @"PalmFetch" code:1 userInfo:@{
+                NSLocalizedDescriptionKey: exception.reason ?: @""
+            }];
+        }
+        return @[];
+    }
+}
+
+@end
+
 void UIKitGuestHooksInit(void)
 {
     static dispatch_once_t onceToken;
@@ -154,5 +238,23 @@ void UIKitGuestHooksInit(void)
         SwizzleObjCMethod(@selector(shouldAutorotateToInterfaceOrientation:), [UIViewController class], @selector(hook_shouldAutorotateToInterfaceOrientation:), nil, kSwizzleMethodTypeInstance);
         SwizzleObjCMethod(@selector(setAutorotates:forceUpdateInterfaceOrientation:), [UIWindow class], @selector(hook_setAutorotates:forceUpdateInterfaceOrientation:), nil, kSwizzleMethodTypeInstance);
         SwizzleObjCMethod(@selector(setDelegate:), [UIApplication class], @selector(hook_setDelegate:), nil, kSwizzleMethodTypeInstance);
+        Class storeDescription = NSClassFromString(@"NSPersistentStoreDescription");
+        if (storeDescription) {
+            SwizzleObjCMethod(@selector(setCloudKitContainerOptions:), storeDescription, @selector(palm_ignoreCloudKitContainerOptions:), [NSObject class], kSwizzleMethodTypeInstance);
+        }
+        Class cloudContainer = NSClassFromString(@"NSPersistentCloudKitContainer");
+        if (cloudContainer) {
+            SwizzleObjCMethod(@selector(loadPersistentStoresWithCompletionHandler:), cloudContainer, @selector(palm_loadLocalStores:), [NSObject class], kSwizzleMethodTypeInstance);
+        }
+        Class context = NSClassFromString(@"NSManagedObjectContext");
+        if (context) {
+            SwizzleObjCMethod(@selector(executeFetchRequest:error:), context, @selector(palm_executeFetchRequest:error:), [NSObject class], kSwizzleMethodTypeInstance);
+        }
+        dlopen("/System/Library/Frameworks/CloudKit.framework/CloudKit", RTLD_LAZY);
+        Class ckContainer = NSClassFromString(@"CKContainer");
+        if (ckContainer) {
+            SwizzleObjCMethod(@selector(containerWithIdentifier:), ckContainer, @selector(palm_containerWithIdentifier:), [NSObject class], kSwizzleMethodTypeClass);
+            SwizzleObjCMethod(@selector(accountStatusWithCompletionHandler:), ckContainer, @selector(palm_accountStatusWithCompletionHandler:), [NSObject class], kSwizzleMethodTypeInstance);
+        }
     });
 }

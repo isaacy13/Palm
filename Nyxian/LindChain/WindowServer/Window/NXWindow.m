@@ -549,7 +549,7 @@ static inline CGSize EVSizeForAspect(CGSize base,
     
     dispatch_once(&_viewDidAppearOnceDispatch, ^{
         // MARK: Suppose to only run on phones
-        if([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPhone)
+        if([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPhone && !self.isMaximized)
         {
             [self maximizeWindow:NO];
         }

@@ -42,10 +42,16 @@ CFLAGS=(-target arm64-apple-ios18.0 -isysroot "$SDK" -I "$ROOT/Nyxian" -fobjc-ar
 clang "${CFLAGS[@]}" -DHOST_ENV -I "$ROOT" -I "$HOST/build/procobj/include" -c "$ROOT/Nyxian/LindChain/ProcEnvironment/Surface/trust/signing.c" -o "$OBJ/signing.o"
 clang "${CFLAGS[@]}" -c "$ROOT/Nyxian/LindChain/ProcEnvironment/Surface/trust/cdhash.c" -o "$OBJ/cdhash.o"
 clang "${CFLAGS[@]}" -c "$HOST/MachOMap.c" -o "$OBJ/MachOMap.o"
-clang "${CFLAGS[@]}" -I "$ROOT" -c "$ROOT/Nyxian/LindChain/PalmHost/PalmLaunch.m" -o "$OBJ/PalmLaunch.o"
+clang "${CFLAGS[@]}" -I "$ROOT" -I "$ROOT/LiveProcess" -c "$ROOT/Nyxian/LindChain/PalmHost/PalmLaunch.m" -o "$OBJ/PalmLaunch.o"
 clang "${CFLAGS[@]}" -F "$STAGE" -c "$HOST/PalmJobs.m" -o "$OBJ/PalmJobs.o"
 
 PROC="$HOST/build/procobj"
+mkdir -p "$PROC"
+clang "${CFLAGS[@]}" -I "$ROOT" -I "$ROOT/LiveProcess" -c "$ROOT/Nyxian/LindChain/ProcEnvironment/PEProcess.m" -o "$PROC/PEProcess.m.o"
+clang "${CFLAGS[@]}" -I "$ROOT" -I "$ROOT/LiveProcess" -c "$ROOT/Nyxian/LindChain/WindowServer/NXWindowServer.m" -o "$PROC/NXWindowServer.m.o"
+clang "${CFLAGS[@]}" -I "$ROOT" -I "$ROOT/LiveProcess" -c "$ROOT/Nyxian/LindChain/WindowServer/Window/NXWindow.m" -o "$PROC/NXWindow.m.o"
+clang "${CFLAGS[@]}" -I "$ROOT" -I "$ROOT/LiveProcess" -c "$ROOT/Nyxian/LindChain/ProcEnvironment/Surface/sys/compat/pectl.m" -o "$PROC/pectl.m.o"
+clang "${CFLAGS[@]}" -I "$ROOT" -I "$ROOT/LiveProcess" -c "$ROOT/Nyxian/LindChain/WindowServer/Session/NXWindowSessionApplication.m" -o "$PROC/NXWindowSessionApplication.m.o"
 proc_args=()
 if [[ -d "$PROC" ]]; then
   while IFS= read -r object; do

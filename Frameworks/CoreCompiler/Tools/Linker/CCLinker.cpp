@@ -54,10 +54,11 @@ Boolean CCLinkerJobExecute(CCJobRef job,
     CFArrayRef argsArray = CCJobCreateArguments(CFGetAllocator(job), job);
     
     llvm::SmallVector<std::string, 64> argStorage = CCArrayToStringVector(argsArray);
+    // Insert argv0 before taking c_str pointers. push_back after that moves
+    // every short string once the 64-wide inline buffer is full, and lld
+    // then runs without -arch.
+    argStorage.insert(argStorage.begin(), "ld64.lld");
     llvm::SmallVector<const char *, 64> Args = StringVectorToCStrings(argStorage);
-    
-    argStorage.push_back("ld64.lld");   /* have to inject */
-    Args.insert(Args.begin(), argStorage.back().c_str());
     
     std::string errBuf;
     int retCode;
