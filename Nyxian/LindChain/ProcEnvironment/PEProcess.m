@@ -212,6 +212,14 @@ static void PEAttachControllingTTYForSpawn(NSDictionary *items,
         self.applicationObject = [[LDEApplicationWorkspace shared] applicationObjectForExecutablePath:self.executablePath];
     }
     self.bundleIdentifier = self.applicationObject ? self.applicationObject.bundleIdentifier : nil;
+    if(self.bundleIdentifier.length == 0)
+    {
+        id passed = items[@"PEBundleIdentifier"];
+        if([passed isKindOfClass:[NSString class]] && [passed length] > 0)
+        {
+            self.bundleIdentifier = passed;
+        }
+    }
     self.displayName = self.applicationObject ? self.applicationObject.localizedName : [self.executablePath lastPathComponent];
     
     /* spawning process */

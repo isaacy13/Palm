@@ -34,10 +34,83 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <mach/arm/thread_status.h>
+#include <pthread.h>
+#include <ptrauth.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
+
+extern int palm_guest_ui_ready;
+static mach_port_t palm_main_mach_thread;
+static void palm_guest_trace(const char *line);
+
+static void *palm_sample_main(void *unused)
+{
+    (void)unused;
+    sleep(3);
+    if(palm_guest_ui_ready)
+    {
+        palm_guest_trace("sample skipped ui ready");
+        return NULL;
+    }
+    if(thread_suspend(palm_main_mach_thread) != KERN_SUCCESS)
+    {
+        palm_guest_trace("sample suspend failed");
+        return NULL;
+    }
+    arm_thread_state64_t state;
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    kern_return_t kr = thread_get_state(palm_main_mach_thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count);
+    uintptr_t frames[16];
+    int frameCount = 0;
+    if(kr == KERN_SUCCESS)
+    {
+        frames[frameCount++] = (uintptr_t)arm_thread_state64_get_pc(state);
+        uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(state);
+        for(int i = 0; i < 14 && fp > 0x1000 && frameCount < 16; i++)
+        {
+            uintptr_t next = *(uintptr_t *)fp;
+            uintptr_t lr = *(uintptr_t *)(fp + sizeof(uintptr_t));
+            next = (uintptr_t)ptrauth_strip((void *)next, ptrauth_key_frame_pointer);
+            lr = (uintptr_t)ptrauth_strip((void *)lr, ptrauth_key_return_address);
+            frames[frameCount++] = lr;
+            if(next <= fp)
+            {
+                break;
+            }
+            fp = next;
+        }
+    }
+    thread_resume(palm_main_mach_thread);
+
+    char line[2400];
+    int used = snprintf(line, sizeof(line), "sample kr %d", kr);
+    for(int i = 0; i < frameCount && used > 0 && used < (int)sizeof(line) - 160; i++)
+    {
+        Dl_info info;
+        memset(&info, 0, sizeof(info));
+        if(dladdr((void *)frames[i], &info) != 0 && info.dli_sname != NULL)
+        {
+            used += snprintf(line + used, sizeof(line) - (size_t)used, " | %s+%llu", info.dli_sname,
+                             (unsigned long long)(frames[i] - (uintptr_t)info.dli_saddr));
+        }
+        else if(info.dli_fname != NULL)
+        {
+            const char *base = strrchr(info.dli_fname, '/');
+            used += snprintf(line + used, sizeof(line) - (size_t)used, " | %s+%llu", base ? base + 1 : info.dli_fname,
+                             (unsigned long long)(frames[i] - (uintptr_t)info.dli_fbase));
+        }
+        else
+        {
+            used += snprintf(line + used, sizeof(line) - (size_t)used, " | %llx", (unsigned long long)frames[i]);
+        }
+    }
+    palm_guest_trace(line);
+    return NULL;
+}
 #include <stdlib.h>
 #include <unistd.h>
 #include <LiveShim/patchcache.h>
@@ -216,5 +289,10 @@ int LCBootstrapMain(NSString *executablePath,
     }
     
     extern char **environ;
+    palm_main_mach_thread = pthread_mach_thread_np(pthread_self());
+    pthread_t sampler;
+    pthread_create(&sampler, NULL, palm_sample_main, NULL);
+    pthread_detach(sampler);
+    palm_guest_trace("calling main");
     return guestMain(argc, argv, environ, executablePath.fileSystemRepresentation);
 }

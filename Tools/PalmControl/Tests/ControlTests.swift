@@ -4,6 +4,77 @@ import XCTest
 @testable import PalmControl
 
 final class ControlTests: XCTestCase {
+    func testHealthKitRepairAddsThePreferredZoneMethod() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("palm-hk-\(UUID().uuidString)")
+        let header = root.appendingPathComponent("System/Library/Frameworks/HealthKit.framework/Modules/HealthKit.swiftmodule/arm64e-apple-ios.swiftinterface")
+        try? FileManager.default.createDirectory(at: header.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let existing = """
+        extension HealthKit.HKWorkout {
+          public var zoneGroupsByType: [HealthKit.HKQuantityType : HealthKit.HKWorkoutZoneGroup]? { get }
+        }
+        public struct HKWorkoutZone : Swift.Sendable {
+          public let index: Swift.Int
+        }
+
+        """
+        try? existing.write(to: header, atomically: true, encoding: .utf8)
+        repairHealthKitWorkoutZones(sdkRoot: root)
+        let updated = (try? String(contentsOf: header, encoding: .utf8)) ?? ""
+        XCTAssertTrue(updated.contains("preferredWorkoutZoneConfiguration"))
+        XCTAssertTrue(updated.contains("var minimum:"))
+        XCTAssertEqual(updated.components(separatedBy: "struct HKWorkoutZone ").count, 2)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func testCompileCacheKeepsAnUnchangedObject() {
+        let stamp = compileArgumentStamp(["swiftc", "-c", "/src/A.swift"])
+        let older = Date(timeIntervalSince1970: 10)
+        let newer = Date(timeIntervalSince1970: 20)
+        XCTAssertTrue(compileOutputIsFresh(outputExists: true, outputDate: newer, inputDates: [older], savedStamp: stamp, argumentStamp: stamp))
+        XCTAssertFalse(compileOutputIsFresh(outputExists: true, outputDate: older, inputDates: [newer], savedStamp: stamp, argumentStamp: stamp))
+        XCTAssertFalse(compileOutputIsFresh(outputExists: true, outputDate: newer, inputDates: [older], savedStamp: "stale", argumentStamp: stamp))
+        XCTAssertEqual(
+            compileInputPaths(arguments: ["-c", "/src/A.swift", "-sdk", "/sdk"], declaredInputs: ["/src/B.swift"], output: "/tmp/A.o"),
+            ["/src/B.swift", "/src/A.swift"]
+        )
+    }
+
+    func testAVAudioSessionActivationMatchesTheIOS27SDK() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("palm-av-sdk-\(UUID().uuidString)")
+        let header = root.appendingPathComponent("System/Library/Frameworks/AVFAudio.framework/Headers/AVAudioSession.h")
+        try? FileManager.default.createDirectory(at: header.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let stale = "- (void)activateWithOptions:(AVAudioSessionActivationOptions)options completionHandler:(void (^)(BOOL activated, NSError * _Nullable error))handler API_AVAILABLE(watchos(5.0)) API_UNAVAILABLE(ios, tvos) API_UNAVAILABLE(macos, macCatalyst);\n"
+        try? stale.write(to: header, atomically: true, encoding: .utf8)
+        repairAVAudioSessionActivation(sdkRoot: root)
+        let updated = (try? String(contentsOf: header, encoding: .utf8)) ?? ""
+        XCTAssertTrue(updated.contains("API_AVAILABLE(ios(27.0), watchos(5.0), tvos(27.0), visionos(27.0))"))
+        XCTAssertFalse(updated.contains("API_UNAVAILABLE(ios, tvos)"))
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    func testBinaryFrameworkKeepsItsOwnModuleMap() {
+        let headers = [URL(fileURLWithPath: "/wrap/include/dummy.h")]
+        XCTAssertFalse(shouldEmitPackageModuleMap(moduleName: "FirebaseAnalytics", headers: headers, binaryModules: ["FirebaseAnalytics"]))
+        XCTAssertTrue(shouldEmitPackageModuleMap(moduleName: "FirebaseCrashlytics", headers: [URL(fileURLWithPath: "/Public/FIRCrashlytics.h")], binaryModules: ["FirebaseAnalytics"]))
+    }
+
+    func testIsolatedDeinitMarksTheWorkCopyAndLeavesOtherLines() {
+        let source = """
+        @MainActor
+        final class Camera: UIViewController {
+            deinit {
+                remove()
+            }
+            nonisolated deinit {
+            }
+        }
+        """
+        let updated = isolateDeinits(source)
+        XCTAssertTrue(updated.contains("isolated deinit {"))
+        XCTAssertTrue(updated.contains("nonisolated deinit {"))
+        XCTAssertFalse(updated.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix("deinit") })
+    }
+
     func testPreviewStripKeepsMembersMentionedBesideTheMacroName() {
         let source = """
         /// Stable default so `#Preview` does not mint a new UUID.
@@ -166,6 +237,73 @@ final class ControlTests: XCTestCase {
         XCTAssertEqual(objects, ["/tmp/A-111.o", "/tmp/Cache/Foo-0.o"])
     }
 
+    func testLaunchBundlesAVendorFrameworkAndSkipsTheSDK() {
+        let sdk = "/var/SDK/iPhoneOS26.5.sdk"
+        let vendor = "/var/Projects/ios/Vendor/LiteRT-LM/CLiteRTLM.xcframework/ios-arm64"
+        let bundled = frameworksToBundle(
+            arguments: [
+                "-F", sdk + "/System/Library/Frameworks",
+                "-framework", "UIKit",
+                "-F", vendor,
+                "-framework", "CLiteRTLM",
+                "-framework", "FirebaseAnalytics",
+                "-framework", "MissingKit",
+            ],
+            sdkRoot: sdk,
+            fileExists: {
+                $0 == vendor + "/CLiteRTLM.framework" || $0 == vendor + "/FirebaseAnalytics.framework"
+            },
+            isDynamicLibrary: { $0.hasSuffix("/CLiteRTLM") }
+        )
+        XCTAssertEqual(bundled, [vendor + "/CLiteRTLM.framework"])
+    }
+
+    func testLinkKeepsOneCopyOfARepeatedDriverObject() {
+        let arguments = [
+            "/tmp/EncodedRolloutAssignment-67928c.o",
+            "/tmp/EncodedRolloutAssignment-f9c4ca.o",
+            "/tmp/Other-abcdef.o",
+            "-o", "/tmp/GuideAI",
+        ]
+        XCTAssertEqual(
+            dedupingRepeatedObjects(arguments),
+            ["/tmp/EncodedRolloutAssignment-67928c.o", "/tmp/Other-abcdef.o", "-o", "/tmp/GuideAI"]
+        )
+    }
+
+    func testLinkLooksUpIOS27SymbolsAndSkipsAMissingRuntimeArchive() {
+        let prepared = preparingLinkArguments(
+            ["-syslibroot", "/private/var/mobile/Documents/SDK/iPhoneOS26.5.sdk", "-o", "/tmp/GuideAI"],
+            runtimeLibraryExists: false
+        )
+        XCTAssertFalse(prepared.contains("-lclang_rt.ios"))
+        XCTAssertEqual(prepared.suffix(3), ["-adhoc_codesign", "-undefined", "dynamic_lookup"])
+    }
+
+    func testLinkerDropsFrameworksThatAreNotOnDisk() {
+        let arguments = [
+            "-F", "/sdk/Frameworks",
+            "-framework", "UIKit",
+            "-framework", "AppKit",
+            "-framework", "EmojiKit",
+            "-o", "/tmp/GuideAI",
+        ]
+        let kept = droppingMissingFrameworks(arguments) { path in
+            path == "/sdk/Frameworks/UIKit.framework"
+        }
+        XCTAssertEqual(kept, ["-F", "/sdk/Frameworks", "-framework", "UIKit", "-o", "/tmp/GuideAI"])
+    }
+
+    func testLargeLinkUsesOneResponseFileArgument() {
+        let small = (0..<63).map { "-L\($0)" }
+        XCTAssertEqual(linkerInvocation(arguments: small, responseFile: "/tmp/link.rsp"), small)
+        let large = (0..<64).map { "-framework\($0)" }
+        XCTAssertEqual(
+            linkerInvocation(arguments: large, responseFile: "/tmp/link.rsp"),
+            ["@/tmp/link.rsp"]
+        )
+    }
+
     func testThreeRequestsStayInsideTheirStages() throws {
         let fixture = fixtureRoot()
         let context = try makeContext()
@@ -197,6 +335,27 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(tested.launched)
         XCTAssertEqual(recording.calls.last, "test")
         XCTAssertTrue(tested.logs.contains("SampleTests.swift"))
+    }
+
+    func testUICheckRunsWhenTheNamedTestIsNotAnOnDeviceBinary() throws {
+        let recording = RecordingToolchain()
+        let executor = ControlExecutor(toolchain: recording, sourceRoot: fixtureRoot(), context: try makeContext())
+        let tested = executor.run(request(
+            .buildRunAndTests,
+            tests: ["palm-launch-visible"],
+            ui: [UICheck(name: "Welcome to GuideAI", action: "wait")]
+        ))
+        XCTAssertTrue(tested.success)
+        XCTAssertTrue(tested.launched)
+        XCTAssertEqual(tested.stagesRun, [.pull, .compile, .link, .sign, .launch, .test])
+        XCTAssertFalse(recording.calls.contains("test"))
+        XCTAssertTrue(tested.logs.contains("ui checks run against pid 42"))
+        XCTAssertFalse(tested.logs.contains("SampleTests.swift"))
+
+        recording.calls.removeAll()
+        let missing = executor.run(request(.buildRunAndTests, tests: ["palm-launch-visible"]))
+        XCTAssertTrue(recording.calls.contains("test"))
+        XCTAssertFalse(missing.logs.contains("ui checks run against pid"))
     }
 
     func testCompileFailureDoesNotLinkOrLaunch() throws {
@@ -277,12 +436,15 @@ final class ControlTests: XCTestCase {
     func testAgentDeviceRunnerOpensTheLaunchedAppAndChecksIt() throws {
         let previousCommand = AgentDeviceRunner.command
         let previousDevice = AgentDeviceRunner.deviceUDID
+        let previousHost = AgentDeviceRunner.hostBundleIdentifier
         defer {
             AgentDeviceRunner.command = previousCommand
             AgentDeviceRunner.deviceUDID = previousDevice
+            AgentDeviceRunner.hostBundleIdentifier = previousHost
         }
         var calls: [[String]] = []
         AgentDeviceRunner.deviceUDID = "00008150-000A70980EA0C01C"
+        AgentDeviceRunner.hostBundleIdentifier = nil
         AgentDeviceRunner.command = { arguments in
             calls.append(arguments)
             return (0, "ran \(arguments[0])\n")
@@ -296,6 +458,12 @@ final class ControlTests: XCTestCase {
         XCTAssertFalse(calls[0].contains("--relaunch"))
         XCTAssertTrue(log.contains("ran open"))
         XCTAssertTrue(log.contains("ran snapshot"))
+
+        calls.removeAll()
+        AgentDeviceRunner.hostBundleIdentifier = "com.onexengineering.PalmHost"
+        _ = try AgentDeviceRunner.run(process: process, checks: [UICheck(name: "Welcome to GuideAI", action: "wait")])
+        XCTAssertEqual(calls[0], ["open", "com.onexengineering.PalmHost", "--foreground", "--platform", "ios", "--udid", "00008150-000A70980EA0C01C"])
+        XCTAssertEqual(calls[1], ["wait", "text", "Welcome to GuideAI", "--platform", "ios", "--udid", "00008150-000A70980EA0C01C"])
     }
 
     func testGuideAIPlanExposesFrameworksAndStopsBeforeLaunch() throws {
@@ -357,6 +525,8 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(build.localPackages.contains("FirebaseCore"))
         XCTAssertTrue(build.localPackages.contains("FirebaseCrashlytics"))
         XCTAssertTrue(build.localPackages.contains("GoogleUtilities-Environment"))
+        XCTAssertTrue(build.localPackages.contains("GoogleUtilities-Network"))
+        XCTAssertTrue(build.localPackages.contains("GoogleUtilities-Reachability"))
         XCTAssertTrue(build.localPackages.contains("nanopb"))
         XCTAssertTrue(build.localPackages.contains("FBLPromises"))
         XCTAssertTrue(build.compileJobs.contains { job in
@@ -427,6 +597,7 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(guideArguments.contains("-default-isolation"))
         XCTAssertTrue(guideArguments.contains("MainActor"))
         XCTAssertTrue(guideArguments.contains("MemberImportVisibility"))
+        XCTAssertTrue(guideArguments.contains("IsolatedDeinit"))
         XCTAssertTrue(guideArguments.contains { $0.hasSuffix("host/libSwiftInProcPluginServer.dylib") })
         XCTAssertTrue(guideArguments.contains { $0.hasSuffix("host/plugins") })
         XCTAssertTrue(build.compileJobs.contains { job in
@@ -482,6 +653,32 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(tested.preparesLaunch)
         XCTAssertTrue(tested.includesTests)
         XCTAssertFalse(tested.testSources.isEmpty)
+        XCTAssertGreaterThan(tested.testSources.count, 2)
+    }
+
+    func testNamedTestsSelectOnlyThoseFiles() throws {
+        let project = URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI.xcodeproj")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: project.path))
+        let subset = try ProjectDriver().plan(
+            project: project,
+            target: "GuideAI",
+            kind: .buildRunAndTests,
+            tests: ["PartyMinimumSpotsForVotingExactEdgeTests", "StreetSpeedLimitTests"],
+            context: try makeContext()
+        )
+        let names = Set(subset.testSources.map {
+            URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
+        })
+        XCTAssertEqual(names, ["PartyMinimumSpotsForVotingExactEdgeTests", "StreetSpeedLimitTests"])
+    }
+
+    func testCompileThreadCountClampsToMaximumCores() {
+        XCTAssertEqual(compileThreadCount(requested: nil, cores: 6), 6)
+        XCTAssertEqual(compileThreadCount(requested: 0, cores: 6), 6)
+        XCTAssertEqual(compileThreadCount(requested: -3, cores: 6), 6)
+        XCTAssertEqual(compileThreadCount(requested: 2, cores: 6), 2)
+        XCTAssertEqual(compileThreadCount(requested: 40, cores: 6), 6)
+        XCTAssertEqual(compileThreadCount(requested: nil, cores: 0), 1)
     }
 
     func testGitPullChecksOutTheRequestedBranch() throws {

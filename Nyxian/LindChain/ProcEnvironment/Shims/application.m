@@ -21,6 +21,10 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#include <errno.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #import <AVFoundation/AVFoundation.h>
 #import <LindChain/ProcEnvironment/Shims/application.h>
 #import <LindChain/ProcEnvironment/Shims/environment.h>
@@ -36,17 +40,43 @@
 static dispatch_source_t global_signal_source = nil;
 
 
+int palm_guest_ui_ready = 0;
+
 @implementation UIApplication (ProcEnvironment)
 
 - (void)hook_run
 {
+    palm_guest_ui_ready = 1;
     /* tell host app to let our process appear as a window */
+    const char *root = getenv("NXROOT");
+    if (root != NULL && root[0] != '\0') {
+        char path[1024];
+        char note[64];
+        snprintf(path, sizeof(path), "%s/boot/guest.txt", root);
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            snprintf(note, sizeof(note), "hook_run\n");
+            write(fd, note, strlen(note));
+            close(fd);
+        }
+    }
     liveshim_syscall(SYS_pectl, kPECTLCategoryUserInterface, kPECTLUserInterfaceInit, 0, 0, MACH_PORT_NULL, NULL);
     
     while(errno == EAGAIN)
     {
         usleep(500);
         liveshim_syscall(SYS_pectl, kPECTLCategoryUserInterface, kPECTLUserInterfaceInit, 0, 0, MACH_PORT_NULL, NULL);
+    }
+    if (root != NULL && root[0] != '\0') {
+        char path[1024];
+        char note[64];
+        snprintf(path, sizeof(path), "%s/boot/guest.txt", root);
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) {
+            snprintf(note, sizeof(note), "hook_run errno %d\n", errno);
+            write(fd, note, strlen(note));
+            close(fd);
+        }
     }
     
     [self hook_run];

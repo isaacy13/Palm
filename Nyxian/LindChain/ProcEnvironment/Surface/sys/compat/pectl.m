@@ -34,6 +34,20 @@
 #import <ksurface_config.h>
 #import <ksurface_abi.h>
 
+static void palm_window_trace(NSString *line)
+{
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/window-trace.txt"];
+    NSString *note = [line stringByAppendingString:@"\n"];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle == nil) {
+        [note writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [handle seekToEndOfFile];
+        [handle writeData:[note dataUsingEncoding:NSUTF8StringEncoding]];
+        [handle closeFile];
+    }
+}
+
 DEFINE_SYSCALL_HANDLER(pectl_launchservice)
 {
     PECTLLaunchService action = (PECTLLaunchService)args[1];
@@ -347,6 +361,7 @@ DEFINE_SYSCALL_HANDLER(pectl_userinterface)
                 if(sharedWindowServer == nil)
                 {
                     /* window server is not running yet */
+                    palm_window_trace([NSString stringWithFormat:@"pectl pid %d no window server", pid]);
                     syscall_send_reply(&(recv->header), -1, NULL, 0, true, EAGAIN);
                     return;
                 }
@@ -355,15 +370,17 @@ DEFINE_SYSCALL_HANDLER(pectl_userinterface)
                 if(process == nil || process.bundleIdentifier == nil)
                 {
                     /* process must exist in Process Manager */
+                    palm_window_trace([NSString stringWithFormat:@"pectl pid %d process %@ bundle %@", pid, process, process.bundleIdentifier]);
                     syscall_send_reply(&(recv->header), -1, NULL, 0, true, EACCES);
                     return;
                 }
                 
                 id_t wid = [sharedWindowServer windowIdentifierForBundleIdentifier:process.bundleIdentifier];
-                if(wid < 0)
+                if(wid != (id_t)-1)
                 {
                     /* bundle is already presented as a window */
-                    syscall_send_reply(&(recv->header), -1, NULL, 0, true, EACCES);
+                    palm_window_trace([NSString stringWithFormat:@"pectl pid %d already presented %u", pid, (unsigned)wid]);
+                    syscall_send_reply(&(recv->header), 0, NULL, 0, true, 0);
                     return;
                 }
                 

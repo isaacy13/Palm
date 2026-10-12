@@ -6,9 +6,13 @@
 #import <LindChain/ProcEnvironment/Surface/trust/trust.h>
 #import <LindChain/ProcEnvironment/Utils/vnode.h>
 #import <LindChain/ProcEnvironment/PEExtension.h>
+#import <LindChain/ProcEnvironment/PEProcessManager.h>
+#import <LindChain/WindowServer/NXWindowServer.h>
+#import <LindChain/WindowServer/Session/NXWindowSessionApplication.h>
 #import <LindChain/ProcEnvironment/Surface/cache/patchcache.h>
 #import <LindChain/ProcEnvironment/LiveContainer/LCMachOUtils.h>
 #include <errno.h>
+#import <objc/runtime.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <libkern/OSByteOrder.h>
 #include <mach-o/loader.h>
@@ -58,6 +62,47 @@ static BOOL PalmInvokeBool(id target, NSString *selectorName, NSString *argument
     return result;
 }
 
+static void PalmIgnoreExtensionLifecycle(id self, SEL _cmd, id note) {
+    (void)self;
+    (void)_cmd;
+    (void)note;
+}
+
+static void PalmAppendTrace(NSString *note) {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/window-trace.txt"];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    NSData *data = [[note stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    if (handle == nil) {
+        [note writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        return;
+    }
+    [handle seekToEndOfFile];
+    [handle writeData:data];
+    [handle closeFile];
+}
+
+static void PalmStopBlockingOnExtension(void) {
+    Class cls = NSClassFromString(@"EXConcreteExtension");
+    if (cls == Nil) {
+        PalmAppendTrace(@"extension lifecycle class missing");
+        return;
+    }
+    int replaced = 0;
+    for (NSString *name in @[
+        @"_hostWillResignActiveNote:",
+        @"_hostDidEnterBackgroundNote:",
+        @"_hostWillEnterForegroundNote:",
+        @"_hostDidBecomeActiveNote:",
+    ]) {
+        Method method = class_getInstanceMethod(cls, NSSelectorFromString(name));
+        if (method != NULL) {
+            method_setImplementation(method, (IMP)PalmIgnoreExtensionLifecycle);
+            replaced++;
+        }
+    }
+    PalmAppendTrace([NSString stringWithFormat:@"extension lifecycle replaced %d", replaced]);
+}
+
 void PalmBootSurface(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -65,6 +110,7 @@ void PalmBootSurface(void) {
             ksurface_kinit();
         }
     });
+    PalmStopBlockingOnExtension();
 }
 
 static uint32_t PalmBE32(uint32_t value) {
@@ -303,7 +349,7 @@ pid_t PalmLaunchBundle(NSString *bundleIdentifier, NSString *bundlePath, NSStrin
 
     NSString *name = bundlePath.lastPathComponent.stringByDeletingPathExtension;
     NSString *executable = [bundlePath stringByAppendingPathComponent:name];
-    NSDictionary *items = @{
+    NSMutableDictionary *items = [@{
         @"PEExecutablePath": executable,
         @"PEArguments": @[executable],
         @"PEEnvironment": @{
@@ -313,7 +359,10 @@ pid_t PalmLaunchBundle(NSString *bundleIdentifier, NSString *bundlePath, NSStrin
             @"NXROOT": bundlePath,
         },
         @"PEWorkingDirectory": bundlePath,
-    };
+    } mutableCopy];
+    if (bundleIdentifier.length > 0) {
+        items[@"PEBundleIdentifier"] = bundleIdentifier;
+    }
 
     SEL selector = NSSelectorFromString(@"spawnProcessWithItems:withKernelSurfaceProcess:");
     NSMethodSignature *signature = [manager methodSignatureForSelector:selector];
@@ -331,7 +380,6 @@ pid_t PalmLaunchBundle(NSString *bundleIdentifier, NSString *bundlePath, NSStrin
     [invocation setArgument:&items atIndex:2];
     [invocation setArgument:&proc atIndex:3];
     [invocation invoke];
-    (void)bundleIdentifier;
 
     pid_t pid = -1;
     [invocation getReturnValue:&pid];
@@ -366,6 +414,28 @@ pid_t PalmLaunchBundle(NSString *bundleIdentifier, NSString *bundlePath, NSStrin
         if (blob.entitlements) {
             CFRelease(blob.entitlements);
         }
+    }
+    if (pid > 0) {
+        NSString *bundle = [bundleIdentifier copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NXWindowServer *server = [NXWindowServer shared];
+            PEProcess *process = [[PEProcessManager shared] processForProcessIdentifier:pid];
+            if (process.bundleIdentifier.length == 0 && bundle.length > 0) {
+                process.bundleIdentifier = bundle;
+            }
+            NSString *note = [NSString stringWithFormat:@"host present pid %d server %@ process %@ bundle %@\n",
+                              pid, server, process, process.bundleIdentifier ?: bundle];
+            NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/window-trace.txt"];
+            NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+            if (handle == nil) {
+                [note writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            } else {
+                [handle seekToEndOfFile];
+                [handle writeData:[note dataUsingEncoding:NSUTF8StringEncoding]];
+                [handle closeFile];
+            }
+            PalmStopBlockingOnExtension();
+        });
     }
     return pid;
 }

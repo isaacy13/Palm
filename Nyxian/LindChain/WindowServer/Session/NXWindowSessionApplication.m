@@ -169,7 +169,9 @@ static os_unfair_lock g_window_rects_lock = OS_UNFAIR_LOCK_INIT;
         settings.level = 1;
         settings.persistenceIdentifier = [NSString stringWithFormat:@"sceneID:%@-%@", @"LiveProcess", [NSUUID.UUID UUIDString]];
         settings.statusBarDisabled = true;
-        settings.frame = self.view.frame;
+        settings.frame = UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone
+            ? UIScreen.mainScreen.bounds
+            : self.view.frame;
         if(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone)
         {
             UIEdgeInsets insets = settings.safeAreaInsetsPortrait;
@@ -349,6 +351,9 @@ static os_unfair_lock g_window_rects_lock = OS_UNFAIR_LOCK_INIT;
     /* set presenter to foreground */
     [_scene updateSettingsWithBlock:^(UIMutableApplicationSceneSettings *settings) {
         settings.foreground = YES;
+        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone) {
+            settings.frame = UIScreen.mainScreen.bounds;
+        }
     }];
     
     /* re-activate presenter */

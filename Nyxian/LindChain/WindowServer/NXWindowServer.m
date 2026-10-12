@@ -75,14 +75,61 @@
     
     _windowLayer = [[NXWindowLayerView alloc] init];
     _windowLayer.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    /* UIKit later brings the root view controller forward. zPosition keeps the guest above that view. */
+    _windowLayer.layer.zPosition = 1000;
     
     return self;
+}
+
+- (void)palm_trace:(NSString *)line
+{
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/window-trace.txt"];
+    NSString *note = [line stringByAppendingString:@"\n"];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (handle == nil) {
+        [note writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [handle seekToEndOfFile];
+        [handle writeData:[note dataUsingEncoding:NSUTF8StringEncoding]];
+        [handle closeFile];
+    }
+}
+
+- (void)palm_setLogVisible:(BOOL)visible
+{
+    UIView *log = self.rootViewController.view;
+    if (log != nil && log != _windowLayer) {
+        log.hidden = !visible;
+    }
 }
 
 - (void)layoutSubviews
 {
     [super layoutSubviews];
     _windowLayer.frame = self.bounds;
+    _windowLayer.layer.zPosition = 1000;
+    if (_windowLayer.superview == self) {
+        [super bringSubviewToFront:_windowLayer];
+    }
+    if (_activeWindowIdentifier != (id_t)-1) {
+        [self palm_setLogVisible:NO];
+    }
+}
+
+- (void)bringSubviewToFront:(UIView *)view
+{
+    [super bringSubviewToFront:view];
+    if (_windowLayer != nil && view != _windowLayer && _windowLayer.superview == self) {
+        [super bringSubviewToFront:_windowLayer];
+    }
+}
+
+- (void)didAddSubview:(UIView *)subview
+{
+    [super didAddSubview:subview];
+    if (_windowLayer != nil && subview != _windowLayer && _windowLayer.superview == self) {
+        [super bringSubviewToFront:_windowLayer];
+    }
 }
 
 + (instancetype)sharedWithWindowScene:(UIWindowScene*)windowScene
@@ -127,8 +174,15 @@
         [self moveWindowToFrontWithNumber:@(identifier)];
         [window.session activateWindow];
         [_windowLayer addSubview:window.view];
+        [self bringSubviewToFront:_windowLayer];
         [window openWindow];
+        window.view.alpha = 1;
         [window focusWindow];
+        if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone && !window.isMaximized) {
+            [window maximizeWindow:NO];
+        }
+        [self palm_setLogVisible:NO];
+        [self palm_trace:[NSString stringWithFormat:@"activated %u", (unsigned)identifier]];
     }
     
     if(self.appSwitcherView)
@@ -294,6 +348,7 @@
         if(![session openWindow])
         {
             windowOpened = NO;
+            [self palm_trace:@"session open failed"];
             return;
         }
         
@@ -882,6 +937,9 @@
     if(_activeWindow == window)
     {
         _activeWindow = nil;
+    }
+    if (_activeWindowIdentifier == (id_t)-1 || self.windows.count <= 1) {
+        [self palm_setLogVisible:YES];
     }
     [window deinit];
     [self.windows removeObjectForKey:@(window.identifier)];
