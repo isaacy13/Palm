@@ -39,6 +39,56 @@ final class ControlTests: XCTestCase {
         )
     }
 
+    func testUnchangedRewriteLeavesModificationTime() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("palm-rewrite-\(UUID().uuidString).swift")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text = "import Foundation\nstruct S {\n    isolated deinit { }\n}\n"
+        try writeIfChanged(text, to: url)
+        let past = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: url.path)
+        try writeIfChanged(text, to: url)
+        let kept = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        XCTAssertEqual(kept?.timeIntervalSince1970 ?? 0, past.timeIntervalSince1970, accuracy: 0.001)
+        try writeIfChanged(text + "let added = 1\n", to: url)
+        let updated = try FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date
+        XCTAssertGreaterThan(updated ?? past, past)
+        let written = try Data(contentsOf: url)
+        XCTAssertEqual(written, Data((text + "let added = 1\n").utf8))
+    }
+
+    func testContainerUUIDDoesNotChangeTheCompileStamp() {
+        let oldID = "AEDC0392-19FC-4FBF-B721-BE5E764DABB7"
+        let newID = "11111111-2222-4333-8444-555555555555"
+        func path(_ id: String, _ rest: String) -> String {
+            "/private/var/mobile/Containers/Data/Application/\(id)/\(rest)"
+        }
+        let oldArgs = [
+            "-c", path(oldID, "Documents/Projects/ios/GuideAI/A.swift"),
+            "-sdk", path(oldID, "Documents/SDK/iPhoneOS26.5.sdk"),
+        ]
+        let newArgs = [
+            "-c", path(newID, "Documents/Projects/ios/GuideAI/A.swift"),
+            "-sdk", path(newID, "Documents/SDK/iPhoneOS26.5.sdk"),
+        ]
+        XCTAssertEqual(compileArgumentStamp(oldArgs), compileArgumentStamp(newArgs))
+        XCTAssertEqual(
+            compileArgumentStamp(["/Containers/Data/Application/\(oldID)/Documents/A.swift"]),
+            compileArgumentStamp(["/Containers/Data/Application/\(newID)/Documents/A.swift"])
+        )
+        XCTAssertNotEqual(
+            compileArgumentStamp(oldArgs),
+            compileArgumentStamp([
+                "-c", path(oldID, "Documents/Projects/ios/GuideAI/B.swift"),
+                "-sdk", path(oldID, "Documents/SDK/iPhoneOS26.5.sdk"),
+            ])
+        )
+        XCTAssertNotEqual(compileArgumentStamp(oldArgs), compileArgumentStamp(oldArgs + ["-enable-testing"]))
+        XCTAssertNotEqual(
+            compileArgumentStamp(["HealthKit.swiftinterface=10"] + oldArgs),
+            compileArgumentStamp(["HealthKit.swiftinterface=20"] + oldArgs)
+        )
+    }
+
     func testAVAudioSessionActivationMatchesTheIOS27SDK() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("palm-av-sdk-\(UUID().uuidString)")
         let header = root.appendingPathComponent("System/Library/Frameworks/AVFAudio.framework/Headers/AVAudioSession.h")

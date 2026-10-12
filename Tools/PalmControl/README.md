@@ -101,4 +101,4 @@ Swift files in one module run together when that count is greater than 1. Clang 
 
 Stdout is fully buffered when redirected, so a log file stays empty until `palmctl` exits. An `ESTABLISHED` connection to port 8741 means the session is live. Signing the GuideAI binary moves a large payload and takes a few minutes.
 
-Reinstall PalmHost only when the phone binary itself changed. A new data container changes absolute paths stored in the compile cache, and the next build compiles every file again.
+Reinstall PalmHost only when the phone binary itself changed. Unchanged rewritten sources are cache hits: a rewrite that would write the same bytes leaves the file's modification time alone. A reinstall that only changes the container UUID reuses objects that are still on disk.

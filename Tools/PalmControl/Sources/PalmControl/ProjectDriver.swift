@@ -1005,7 +1005,7 @@ private func sourcesWithCrossImports(_ sources: [URL], sdkRoot: URL, context: Dr
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let dest = directory.appendingPathComponent(shortSourceName(source))
-        let header = extra.map { "import \($0)\n" }.joined()
+        let header = extra.sorted().map { "import \($0)\n" }.joined()
         try writeIfChanged(header + text, to: dest)
         rewritten.append(dest)
     }
@@ -1568,18 +1568,19 @@ private func entryProperty(_ line: String) -> (name: String, type: String, defau
 
 private func shortSourceName(_ source: URL) -> String {
     var hash: UInt64 = 1469598103934665603
-    for byte in source.path.utf8 {
+    for byte in normalizingDataContainerUUID(source.path).utf8 {
         hash ^= UInt64(byte)
         hash &*= 1099511628211
     }
     return String(format: "%016llx", hash) + "-" + source.lastPathComponent
 }
 
-private func writeIfChanged(_ text: String, to url: URL) throws {
-    if let existing = try? String(contentsOf: url, encoding: .utf8), existing == text {
+func writeIfChanged(_ text: String, to url: URL) throws {
+    let bytes = Data(text.utf8)
+    if let existing = try? Data(contentsOf: url), existing == bytes {
         return
     }
-    try text.write(to: url, atomically: true, encoding: .utf8)
+    try bytes.write(to: url, options: .atomic)
 }
 
 private func sourcesWithoutPreviews(_ sources: [URL], context: DriverContext) throws -> [URL] {
@@ -1591,7 +1592,7 @@ private func sourcesWithoutPreviews(_ sources: [URL], context: DriverContext) th
             continue
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let slug = source.path.replacingOccurrences(of: "/", with: "_")
+        let slug = normalizingDataContainerUUID(source.path).replacingOccurrences(of: "/", with: "_")
         let dest = directory.appendingPathComponent(slug)
         try writeIfChanged(stripPreviewBlocks(text), to: dest)
         rewritten.append(dest)
