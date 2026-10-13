@@ -2,6 +2,28 @@
 
 Read this page before driving a build. PalmHost on the iPhone compiles, links, and signs with Nyxian's on-device toolchain. `palmctl` on the Mac sends exactly one request over TCP. A later stage does not run unless that request asked for it.
 
+## How a request runs
+
+```mermaid
+flowchart TD
+  agent["Mac agent runs palmctl"]
+  wire["One JSON line over TCP 8741. The host is the devicectl tunnel IP."]
+  host["PalmHost runs ProjectDriver on the project already on the phone"]
+  compile["Read the pbxproj. Emit swiftc and clang jobs, one file at a time. Reuse the object when it exists, every input is older, and .palmflags matches."]
+  signed["Link and sign inside PalmHost"]
+  kind{"Request kind"}
+  buildStop["build stops"]
+  launch["build-and-run starts LiveProcess.appex, which dlopens the signed Mach-O. The window is a scene inside PalmHost."]
+  tested["build-run-and-tests does that launch, then named tests and optional Mac UI checks"]
+
+  agent --> wire --> host --> compile --> signed --> kind
+  kind --> buildStop
+  kind --> launch
+  kind --> tested
+```
+
+`palmctl` does not compile, and ProjectDriver does not call `xcodebuild`. The log line `compile threads N` is only a count. Several Swift frontends at once hang on one in-process plugin server. One frontend with several primary files fails because each file has its own `-emit-module-path`. A parallel clang batch segfaulted the host. The `.palmflags` stamp drops the data-container UUID. A rewrite that leaves the bytes unchanged keeps the file's modification time. Only `build-run-and-tests` with named `--test` files stages `Testing.swiftmodule` and emits `GuideAI.swiftmodule` for `@testable import`. A plain `build` does not. Leave `--repository` off. The phone uses the tree already in `Documents/Projects`.
+
 | Request | Stages | Result |
 |---|---|---|
 | `build` | pull, compile, link, sign | Logs and success or failure. No launch. |
@@ -91,9 +113,9 @@ The guest window is hosted inside PalmHost. `PALM_HOST_BUNDLE_ID=com.onexenginee
 
 ## Compile threads
 
-Omit `--threads` and the phone uses every performance core. That default ignores the Nyxian settings stepper. Pass `--threads N` to use fewer. The phone clamps `N` to at least 1 and at most the performance-core count. The log line is `compile threads N`.
+Omit `--threads` and the logged count is every performance core. Pass `--threads N` to log a smaller count, clamped to at least 1 and at most that core count. The log line is `compile threads N`.
 
-Swift files in one module run together when that count is greater than 1. Clang stays serial. A parallel clang batch in this process segfaulted the host.
+Clang and Swift compile one file at a time. A parallel clang batch segfaulted the host. Several Swift frontends in this process share one plugin server and never finish a file. Putting those files into one frontend fails immediately, because each file has its own `-emit-module-path`.
 
 ## While it runs
 
