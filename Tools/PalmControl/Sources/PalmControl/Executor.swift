@@ -6,7 +6,7 @@ import Foundation
 public func compileArgumentStamp(_ arguments: [String]) -> String {
     var hash: UInt64 = 1469598103934665603
     for argument in arguments {
-        for byte in argument.utf8 {
+        for byte in normalizingDataContainerUUID(argument).utf8 {
             hash ^= UInt64(byte)
             hash &*= 1099511628211
         }
@@ -14,6 +14,18 @@ public func compileArgumentStamp(_ arguments: [String]) -> String {
     }
     return String(hash, radix: 16)
 }
+
+/// PalmHost's data container UUID changes on reinstall even when the files
+/// were moved intact. Drop that one path segment so the compile stamp matches.
+public func normalizingDataContainerUUID(_ text: String) -> String {
+    guard let regex = dataContainerUUID else { return text }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "/Containers/Data/Application/")
+}
+
+private let dataContainerUUID = try? NSRegularExpression(
+    pattern: #"/Containers/Data/Application/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/"#
+)
 
 public func compileInputPaths(arguments: [String], declaredInputs: [String], output: String) -> [String] {
     var seen = Set<String>()
@@ -36,6 +48,57 @@ public func compileInputPaths(arguments: [String], declaredInputs: [String], out
 public func compileOutputIsFresh(outputExists: Bool, outputDate: Date, inputDates: [Date], savedStamp: String?, argumentStamp: String) -> Bool {
     guard outputExists, savedStamp == argumentStamp, !inputDates.isEmpty else { return false }
     return inputDates.allSatisfy { $0 <= outputDate }
+}
+
+/// The Swift driver writes one object per file under the container `tmp`
+/// directory. That directory can disappear when PalmHost exits. Objects under
+/// `Documents/Cache` are already durable and must not be mirrored back into `tmp`.
+public func outputLivesInTemporaryDirectory(_ outputPath: String, temporaryDirectory: String) -> Bool {
+    func canonical(_ path: String) -> String {
+        var value = (path as NSString).standardizingPath
+        if value.hasPrefix("/private/var/") {
+            value.removeFirst("/private".count)
+        }
+        if value.hasSuffix("/") {
+            value.removeLast()
+        }
+        return value
+    }
+    let temporary = canonical(temporaryDirectory)
+    let parent = canonical((outputPath as NSString).deletingLastPathComponent)
+    return parent == temporary
+}
+
+/// Copy a `tmp` object and its `.palmflags` into `storeDirectory`. `copyItem`
+/// keeps the modification time, so a later restore still loses to a newer input.
+public func persistTemporaryObject(_ outputPath: String, temporaryDirectory: String, storeDirectory: URL, fileManager: FileManager = .default) throws {
+    guard outputLivesInTemporaryDirectory(outputPath, temporaryDirectory: temporaryDirectory) else { return }
+    try fileManager.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
+    for source in [outputPath, outputPath + ".palmflags"] {
+        guard fileManager.fileExists(atPath: source) else { continue }
+        let destination = storeDirectory.appendingPathComponent((source as NSString).lastPathComponent)
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.copyItem(atPath: source, toPath: destination.path)
+    }
+}
+
+/// Put stored objects back into `temporaryDirectory` before the driver looks
+/// for them. An object already in `tmp` is left alone.
+public func restoreTemporaryObjects(from storeDirectory: URL, to temporaryDirectory: URL, fileManager: FileManager = .default) throws -> Int {
+    guard fileManager.fileExists(atPath: storeDirectory.path) else { return 0 }
+    try fileManager.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+    var restored = 0
+    for name in try fileManager.contentsOfDirectory(atPath: storeDirectory.path) {
+        let destination = temporaryDirectory.appendingPathComponent(name)
+        if fileManager.fileExists(atPath: destination.path) { continue }
+        try fileManager.copyItem(atPath: storeDirectory.appendingPathComponent(name).path, toPath: destination.path)
+        if name.hasSuffix(".o") {
+            restored += 1
+        }
+    }
+    return restored
 }
 
 public func emittedObjectPath(arguments: [String], outputFilePath: String?) -> String? {
@@ -264,19 +327,19 @@ public struct ControlExecutor<Toolchain: DeviceToolchain> {
         case .compile:
             let root = request.repository == nil ? sourceRoot : context.workRoot.appendingPathComponent("src")
             let project = root.appendingPathComponent(request.project)
-            var built = try driver.plan(
+            let built = try driver.plan(
                 project: project,
                 target: request.target,
                 kind: request.kind,
-                tests: request.tests,
                 context: context
             )
-            built.compileThreads = request.threads
             if request.kind != .buildRunAndTests && built.includesTests {
                 throw ControlError.stageNotRequested(.test)
             }
             log.append(built.descriptionForLog)
-            plan = built
+            var signed = built
+            applySigning(request, to: &signed)
+            plan = signed
             try toolchain.compile(built, log: log)
         case .link:
             guard let plan else { throw ControlError.linkFailed("link started before compile") }

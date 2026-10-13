@@ -94,6 +94,7 @@ swiftc \
   "$ROOT/Tools/PalmControl/Sources/PalmControl/ProjectDriver.swift" \
   "$ROOT/Tools/PalmControl/Sources/PalmControl/GitPuller.swift" \
   "$ROOT/Tools/PalmControl/Sources/PalmControl/Executor.swift" \
+  "$ROOT/Tools/PalmControl/Sources/PalmControl/Signing.swift" \
   "$ROOT/Tools/PalmControl/Sources/PalmControl/Channel.swift" \
   "$ROOT/Nyxian/LindChain/PalmHost/PalmHost.swift" \
   "$HOST/AppMain.swift" \
@@ -117,6 +118,32 @@ if [[ -d "$LIVE" ]]; then
   mkdir -p "$APP/PlugIns"
   cp -R "$LIVE" "$APP/PlugIns/LiveProcess.appex"
   /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.onexengineering.PalmHost.LiveProcess" "$APP/PlugIns/LiveProcess.appex/Info.plist"
+  # Liquid glass does not paint inside the hosted scene, so the Allow and Let's Go
+  # buttons were invisible. Classic prominent buttons draw in that scene.
+  /usr/libexec/PlistBuddy -c "Delete :UIDesignRequiresCompatibility" "$APP/PlugIns/LiveProcess.appex/Info.plist" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :UIDesignRequiresCompatibility bool true" "$APP/PlugIns/LiveProcess.appex/Info.plist"
+  # TCC reads the process bundle, which is this appex, not the guest Info.plist.
+  LIVE_PLIST="$APP/PlugIns/LiveProcess.appex/Info.plist"
+  while IFS='|' read -r key value; do
+    /usr/libexec/PlistBuddy -c "Delete :$key" "$LIVE_PLIST" >/dev/null 2>&1 || true
+    /usr/libexec/PlistBuddy -c "Add :$key string $value" "$LIVE_PLIST"
+  done <<'EOF'
+NSBluetoothAlwaysUsageDescription|The hosted app uses Bluetooth.
+NSCalendarsFullAccessUsageDescription|The hosted app uses your calendars.
+NSCameraUsageDescription|The hosted app uses the camera.
+NSContactsUsageDescription|The hosted app uses your contacts.
+NSFaceIDUsageDescription|The hosted app uses Face ID.
+NSHealthShareUsageDescription|The hosted app reads health data.
+NSHealthUpdateUsageDescription|The hosted app writes health data.
+NSLocalNetworkUsageDescription|The hosted app uses the local network.
+NSLocationAlwaysAndWhenInUseUsageDescription|The hosted app uses your location.
+NSLocationWhenInUseUsageDescription|The hosted app uses your location.
+NSMicrophoneUsageDescription|The hosted app uses the microphone.
+NSMotionUsageDescription|The hosted app uses motion data.
+NSPhotoLibraryAddUsageDescription|The hosted app saves photos.
+NSPhotoLibraryUsageDescription|The hosted app uses your photos.
+NSSpeechRecognitionUsageDescription|The hosted app uses speech recognition.
+EOF
   cp "$PROFILE" "$APP/PlugIns/LiveProcess.appex/embedded.mobileprovision"
   BROAD="${PALM_LIVEPROCESS_DIR:-$(dirname "$LIVE")}/libBroadpatch.dylib"
   if [[ -f "$BROAD" ]]; then

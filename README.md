@@ -14,7 +14,25 @@
 
 PalmHost on the iPhone compiles, links, and signs with Nyxian's on-device toolchain. A Mac agent drives it with `palmctl` over TCP port 8741. One request does one of three things: `build`, `build-and-run`, or `build-run-and-tests`. Later stages stay off unless that request asked for them.
 
-An agent should read [Tools/PalmControl/README.md](Tools/PalmControl/README.md) and nothing else. That page has the three commands, `--test` for a subset, `--threads`, the tunnel address, and the UI-check environment.
+An agent should read [Tools/PalmControl/README.md](Tools/PalmControl/README.md) and nothing else. That page has the three commands, the tunnel address, and the UI-check environment.
+
+```mermaid
+flowchart TD
+  agent["Mac agent runs palmctl"]
+  wire["One JSON line over TCP 8741. The host is the devicectl tunnel IP."]
+  host["PalmHost runs ProjectDriver on the project already on the phone"]
+  compile["Read the pbxproj. One swiftc or clang invocation per file. Reuse the object when it exists, every input is older, and .palmflags matches."]
+  signed["Link and sign inside PalmHost"]
+  kind{"Request kind"}
+  buildStop["build stops"]
+  launch["build-and-run starts LiveProcess.appex, which dlopens the signed Mach-O. The window is a scene inside PalmHost."]
+  tested["build-run-and-tests does that launch, then Mac UI checks"]
+
+  agent --> wire --> host --> compile --> signed --> kind
+  kind --> buildStop
+  kind --> launch
+  kind --> tested
+```
 
 ## What is it?
 Nyxian is an iOS app that empowers developers with a full toolchain they can use while even being offline for iOS development on iPhone. It supports Swift, C, Objective-C, C++ and Objective-C++. It’s a powerful IDE that made the impossible possible, a fully on-device iOS IDE that doesn’t even need a cloud and can even be used with airplane mode enabled after it downloaded the SDK and resources from our server. It supports officially iOS 18.0 all the way up to the latest iOS version (iOS/iPadOS 27.2 Beta 2 tested). You can compile and run iOS apps on the go with ease, using the entire iOS 26.5 SDK.

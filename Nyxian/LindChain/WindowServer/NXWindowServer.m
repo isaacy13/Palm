@@ -1002,7 +1002,7 @@
     /* checking if maximised */
     if(window.isMaximized)
     {
-        if([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad)
+        if([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad || NXHostPresentsGuestEdgeToEdge())
         {
             return self.bounds;
         }

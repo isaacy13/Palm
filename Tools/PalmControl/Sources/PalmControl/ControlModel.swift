@@ -37,8 +37,16 @@ public struct ControlRequest: Codable, Equatable {
     public var target: String
     public var tests: [String]
     public var ui: [UICheck]
-    /// Compile width. Nil uses every performance core on the phone.
-    public var threads: Int?
+    /// Development certificate. The Mac team-sign uses this instead of a built-in name.
+    public var signingIdentity: String?
+    /// `embedded.mobileprovision` bytes for the app being signed.
+    public var provisioningProfile: Data?
+    /// `application-identifier` from that profile, for the sign log.
+    public var signingProfileIdentifier: String?
+    /// Entitlements written into the team signature. A wildcard profile is not a substitute.
+    public var signingEntitlements: [String: PlistValue]?
+    /// Extra Info.plist entries. Usage strings live here so any app can supply its own.
+    public var infoPlist: [String: PlistValue]?
 
     public init(kind: ControlRequestKind,
                 branch: String,
@@ -47,7 +55,11 @@ public struct ControlRequest: Codable, Equatable {
                 target: String,
                 tests: [String] = [],
                 ui: [UICheck] = [],
-                threads: Int? = nil) {
+                signingIdentity: String? = nil,
+                provisioningProfile: Data? = nil,
+                signingProfileIdentifier: String? = nil,
+                signingEntitlements: [String: PlistValue]? = nil,
+                infoPlist: [String: PlistValue]? = nil) {
         self.kind = kind
         self.branch = branch
         self.repository = repository
@@ -55,7 +67,11 @@ public struct ControlRequest: Codable, Equatable {
         self.target = target
         self.tests = tests
         self.ui = ui
-        self.threads = threads
+        self.signingIdentity = signingIdentity
+        self.provisioningProfile = provisioningProfile
+        self.signingProfileIdentifier = signingProfileIdentifier
+        self.signingEntitlements = signingEntitlements
+        self.infoPlist = infoPlist
     }
 
     /// Stages this request is allowed to start, in order.
@@ -66,7 +82,7 @@ public struct ControlRequest: Codable, Equatable {
         case .buildAndRun:
             return [.pull, .compile, .link, .sign, .launch]
         case .buildRunAndTests:
-            return [.pull, .compile, .link, .sign, .launch, .test]
+            return [.pull, .compile, .link, .sign, .launch]
         }
     }
 
@@ -90,16 +106,8 @@ extension ControlRequestKind {
     }
 
     public var requestsTests: Bool {
-        self == .buildRunAndTests
+        false
     }
-}
-
-/// Width of an on-device compile. A missing or non-positive request uses every
-/// performance core. A larger request clamps to that maximum.
-public func compileThreadCount(requested: Int?, cores: Int) -> Int {
-    let maximum = max(cores, 1)
-    guard let requested, requested > 0 else { return maximum }
-    return min(requested, maximum)
 }
 
 public struct RunningProcess: Codable, Equatable {

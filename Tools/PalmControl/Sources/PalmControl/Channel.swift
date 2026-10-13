@@ -200,33 +200,44 @@ public enum ControlClient {
             connection.cancel()
             throw ControlError.channel(failure.localizedDescription)
         }
+        var pending = Data()
         while true {
-            let received = DispatchSemaphore(value: 0)
-            var payload = Data()
-            func read() {
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 8 * 1024 * 1024) { data, _, isComplete, error in
-                    if let data { payload.append(data) }
-                    if payload.contains(0x0A) || isComplete || error != nil {
-                        if let error { failure = error }
-                        received.signal()
-                        return
+            if !pending.contains(0x0A) {
+                let received = DispatchSemaphore(value: 0)
+                var readError: Error?
+                func read() {
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 8 * 1024 * 1024) { data, _, isComplete, error in
+                        if let data { pending.append(data) }
+                        if pending.contains(0x0A) || isComplete || error != nil {
+                            if let error { readError = error }
+                            received.signal()
+                            return
+                        }
+                        read()
                     }
-                    read()
+                }
+                read()
+                received.wait()
+                if let readError, !pending.contains(0x0A) {
+                    connection.cancel()
+                    throw ControlError.channel(readError.localizedDescription)
                 }
             }
-            read()
-            received.wait()
-            if let failure, payload.isEmpty {
-                connection.cancel()
-                throw ControlError.channel(failure.localizedDescription)
-            }
-            guard let newline = payload.firstIndex(of: 0x0A) else {
+            guard let newline = pending.firstIndex(of: 0x0A) else {
                 connection.cancel()
                 throw ControlError.malformedChannel
             }
-            let line = payload.prefix(upTo: newline)
+            let line = Data(pending.prefix(upTo: newline))
+            pending.removeSubrange(pending.startIndex...newline)
+            if let wire = try? JSONDecoder().decode(WireSign.self, from: line), wire.op == "ping" {
+                continue
+            }
             if let wire = try? JSONDecoder().decode(WireSign.self, from: line), wire.op == "sign" {
-                let signed = try teamSign(wire.bytes)
+                let signed = try teamSign(
+                    wire.bytes,
+                    identity: request.signingIdentity ?? defaultDevelopmentIdentity,
+                    entitlements: request.signingEntitlements
+                )
                 var reply = try JSONEncoder().encode(WireSign(op: "signed", bytes: signed))
                 reply.append(0x0A)
                 let sentBack = DispatchSemaphore(value: 0)
@@ -235,6 +246,10 @@ public enum ControlClient {
                     sentBack.signal()
                 })
                 sentBack.wait()
+                if let failure {
+                    connection.cancel()
+                    throw ControlError.channel(failure.localizedDescription)
+                }
                 continue
             }
             connection.cancel()
@@ -257,7 +272,7 @@ public enum ControlClient {
     }
     #endif
 
-    private static func teamSign(_ encoded: String) throws -> String {
+    private static func teamSign(_ encoded: String, identity: String, entitlements: [String: PlistValue]?) throws -> String {
         #if os(macOS)
         guard let bytes = Data(base64Encoded: encoded) else {
             throw ControlError.signFailed("sign request was not base64")
@@ -269,7 +284,13 @@ public enum ControlClient {
         if removed.status != 0 {
             throw ControlError.signFailed("remove signature \(removed.status) \(removed.output)")
         }
-        let signed = try runCodesign(["-f", "-s", "Apple Development: Isaac Yeang (AT4W55YC44)", url.path])
+        let entitlementsURL = try writeEntitlements(entitlements)
+        defer { if let entitlementsURL { try? FileManager.default.removeItem(at: entitlementsURL) } }
+        let signed = try runCodesign(teamCodesignArguments(
+            identity: identity,
+            binary: url.path,
+            entitlements: entitlementsURL?.path
+        ))
         guard signed.status == 0 else {
             throw ControlError.signFailed("codesign \(signed.status) \(signed.output)")
         }
@@ -278,4 +299,15 @@ public enum ControlClient {
         throw ControlError.signFailed("codesign runs on the Mac")
         #endif
     }
+
+    #if os(macOS)
+    private static func writeEntitlements(_ entitlements: [String: PlistValue]?) throws -> URL? {
+        guard let entitlements, !entitlements.isEmpty else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("palm-entitlements-\(UUID().uuidString).plist")
+        let object = entitlements.mapValues(\.propertyListObject)
+        let data = try PropertyListSerialization.data(fromPropertyList: object, format: .xml, options: 0)
+        try data.write(to: url)
+        return url
+    }
+    #endif
 }
