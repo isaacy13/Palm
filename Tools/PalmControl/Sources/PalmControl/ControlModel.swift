@@ -37,6 +37,16 @@ public struct ControlRequest: Codable, Equatable {
     public var target: String
     public var tests: [String]
     public var ui: [UICheck]
+    /// Development certificate. The Mac team-sign uses this instead of a built-in name.
+    public var signingIdentity: String?
+    /// `embedded.mobileprovision` bytes for the app being signed.
+    public var provisioningProfile: Data?
+    /// `application-identifier` from that profile, for the sign log.
+    public var signingProfileIdentifier: String?
+    /// Entitlements written into the team signature. A wildcard profile is not a substitute.
+    public var signingEntitlements: [String: PlistValue]?
+    /// Extra Info.plist entries. Usage strings live here so any app can supply its own.
+    public var infoPlist: [String: PlistValue]?
 
     public init(kind: ControlRequestKind,
                 branch: String,
@@ -44,7 +54,12 @@ public struct ControlRequest: Codable, Equatable {
                 project: String,
                 target: String,
                 tests: [String] = [],
-                ui: [UICheck] = []) {
+                ui: [UICheck] = [],
+                signingIdentity: String? = nil,
+                provisioningProfile: Data? = nil,
+                signingProfileIdentifier: String? = nil,
+                signingEntitlements: [String: PlistValue]? = nil,
+                infoPlist: [String: PlistValue]? = nil) {
         self.kind = kind
         self.branch = branch
         self.repository = repository
@@ -52,6 +67,11 @@ public struct ControlRequest: Codable, Equatable {
         self.target = target
         self.tests = tests
         self.ui = ui
+        self.signingIdentity = signingIdentity
+        self.provisioningProfile = provisioningProfile
+        self.signingProfileIdentifier = signingProfileIdentifier
+        self.signingEntitlements = signingEntitlements
+        self.infoPlist = infoPlist
     }
 
     /// Stages this request is allowed to start, in order.

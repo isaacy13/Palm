@@ -1,9 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import Network
 import XCTest
 @testable import PalmControl
 
 final class ControlTests: XCTestCase {
+    func testDevelopmentProfileSkipsTheWildcardAndTheAppStoreProfile() {
+        let profiles = [
+            ProvisioningProfileSummary(name: "iOS Team Provisioning Profile: *", applicationIdentifier: "7834J3DHRB.*"),
+            ProvisioningProfileSummary(name: "iOS Team Store Provisioning Profile: com.onexengineering.GuideAI", applicationIdentifier: "7834J3DHRB.com.onexengineering.GuideAI"),
+            ProvisioningProfileSummary(name: "expired", applicationIdentifier: "7834J3DHRB.com.onexengineering.GuideAI", expires: Date(timeIntervalSince1970: 1)),
+            ProvisioningProfileSummary(name: "iOS Team Provisioning Profile: com.onexengineering.GuideAI", applicationIdentifier: "7834J3DHRB.com.onexengineering.GuideAI", expires: Date(timeIntervalSinceNow: 86400)),
+        ]
+        let chosen = chooseDevelopmentProfile(bundleIdentifier: "com.onexengineering.GuideAI", profiles: profiles)
+        XCTAssertEqual(chosen?.name, "iOS Team Provisioning Profile: com.onexengineering.GuideAI")
+        XCTAssertEqual(
+            teamCodesignArguments(identity: "Apple Development: Isaac Yeang (AT4W55YC44)", binary: "/tmp/GuideAI", entitlements: "/tmp/ent.plist"),
+            ["-f", "-s", "Apple Development: Isaac Yeang (AT4W55YC44)", "--timestamp=none", "--generate-entitlement-der", "--entitlements", "/tmp/ent.plist", "/tmp/GuideAI"]
+        )
+    }
+
+    func testCustomInfoPlistOverridesUsageStrings() {
+        let merged = mergedDictionaries(
+            ["CFBundleName": .string("GuideAI")],
+            overlay: ["NSLocationWhenInUseUsageDescription": .string("Guide uses your location.")]
+        )
+        XCTAssertEqual(merged["NSLocationWhenInUseUsageDescription"], .string("Guide uses your location."))
+        XCTAssertEqual(merged["CFBundleName"], .string("GuideAI"))
+    }
+
     func testHealthKitRepairAddsThePreferredZoneMethod() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("palm-hk-\(UUID().uuidString)")
         let header = root.appendingPathComponent("System/Library/Frameworks/HealthKit.framework/Modules/HealthKit.swiftmodule/arm64e-apple-ios.swiftinterface")
@@ -37,6 +62,34 @@ final class ControlTests: XCTestCase {
             compileInputPaths(arguments: ["-c", "/src/A.swift", "-sdk", "/sdk"], declaredInputs: ["/src/B.swift"], output: "/tmp/A.o"),
             ["/src/B.swift", "/src/A.swift"]
         )
+    }
+
+    func testTemporaryObjectsRoundTripIntoTheDurableStore() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("palm-objects-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let temporary = root.appendingPathComponent("tmp")
+        let store = root.appendingPathComponent("objects")
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        let object = temporary.appendingPathComponent("App-62473e.o")
+        try Data("object".utf8).write(to: object)
+        try Data("stamp".utf8).write(to: temporary.appendingPathComponent("App-62473e.o.palmflags"))
+        let past = Date(timeIntervalSince1970: 1_700_000_000)
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: object.path)
+        XCTAssertTrue(outputLivesInTemporaryDirectory(object.path, temporaryDirectory: temporary.path))
+        XCTAssertFalse(outputLivesInTemporaryDirectory(root.appendingPathComponent("Documents/Cache/Palm/GuideAI.o").path, temporaryDirectory: temporary.path))
+        XCTAssertTrue(outputLivesInTemporaryDirectory(
+            "/private/var/mobile/Containers/Data/Application/AEDC0392-19FC-4FBF-B721-BE5E764DABB7/tmp/App-62473e.o",
+            temporaryDirectory: "/var/mobile/Containers/Data/Application/AEDC0392-19FC-4FBF-B721-BE5E764DABB7/tmp/"
+        ))
+        try persistTemporaryObject(object.path, temporaryDirectory: temporary.path, storeDirectory: store)
+        try FileManager.default.removeItem(at: temporary)
+        let restored = try restoreTemporaryObjects(from: store, to: temporary)
+        XCTAssertEqual(restored, 1)
+        let broughtBack = try Data(contentsOf: object)
+        XCTAssertEqual(broughtBack, Data("object".utf8))
+        let kept = try FileManager.default.attributesOfItem(atPath: object.path)[.modificationDate] as? Date
+        XCTAssertEqual(kept?.timeIntervalSince1970 ?? 0, past.timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(try restoreTemporaryObjects(from: store, to: temporary), 0)
     }
 
     func testUnchangedRewriteLeavesModificationTime() throws {
@@ -436,6 +489,61 @@ final class ControlTests: XCTestCase {
         let finished = agent.finish(tested, request: request(.buildRunAndTests, ui: [UICheck(name: "home", action: "snapshot")]))
         XCTAssertEqual(uiCalls, 1)
         XCTAssertTrue(finished.logs.contains("ui snapshot home"))
+    }
+
+    func testClientIgnoresAKeepaliveAndReadsTheResult() throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { ready.signal() }
+        }
+        let accepted = DispatchSemaphore(value: 0)
+        var incoming: NWConnection?
+        listener.newConnectionHandler = { connection in
+            incoming = connection
+            connection.start(queue: .global())
+            accepted.signal()
+        }
+        listener.start(queue: .global())
+        ready.wait()
+        defer {
+            listener.cancel()
+            incoming?.cancel()
+        }
+        let port = try XCTUnwrap(listener.port).rawValue
+        let finished = DispatchSemaphore(value: 0)
+        var response: ControlResponse?
+        var clientError: Error?
+        DispatchQueue.global().async {
+            do {
+                response = try ControlClient.send(request(.build), host: "127.0.0.1", port: port)
+            } catch {
+                clientError = error
+            }
+            finished.signal()
+        }
+        XCTAssertEqual(accepted.wait(timeout: .now() + 5), .success)
+        let result = ControlResponse(
+            success: true,
+            kind: .build,
+            stagesRun: [.sign],
+            failedStage: nil,
+            logs: "signed\n",
+            launched: false,
+            process: nil
+        )
+        var message = Data("{\"op\":\"ping\",\"bytes\":\"\"}\n".utf8)
+        message.append(try JSONEncoder().encode(result))
+        message.append(0x0A)
+        let sent = DispatchSemaphore(value: 0)
+        try XCTUnwrap(incoming).send(content: message, completion: .contentProcessed { _ in
+            sent.signal()
+        })
+        XCTAssertEqual(sent.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+        XCTAssertNil(clientError)
+        XCTAssertEqual(response?.success, true)
+        XCTAssertEqual(response?.logs, "signed\n")
     }
 
     func testChannelBuildDoesNotLaunchAndRunDoes() throws {

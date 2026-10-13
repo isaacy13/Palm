@@ -28,8 +28,36 @@
 	<array>
 		<string>_palmctrl._tcp</string>
 	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>The hosted app uses Bluetooth.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>The hosted app uses your calendars.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>The hosted app uses the camera.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>The hosted app uses your contacts.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>The hosted app uses Face ID.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>The hosted app reads health data.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>The hosted app writes health data.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>The Mac agent sends build requests to this phone.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>The hosted app uses your location.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>The hosted app uses your location.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The hosted app uses the microphone.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>The hosted app uses motion data.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>The hosted app saves photos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>The hosted app uses your photos.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>The hosted app uses speech recognition.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

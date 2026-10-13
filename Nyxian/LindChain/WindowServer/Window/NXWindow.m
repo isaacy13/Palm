@@ -99,18 +99,26 @@
     }];
     self.session.window = self;
     
-    if(NXWindowServer.shared.presentationState != NXWindowServerPresentationStateDefault)
+    if(NXHostPresentsGuestEdgeToEdge())
     {
-        [_windowBar changeFocus:NO];
+        _contentStack.layer.cornerRadius = 0;
+        _contentStack.layer.maskedCorners = 0;
     }
-    
-    [_contentStack addArrangedSubview:_windowBar];
-    
-    [NSLayoutConstraint activateConstraints:@[
-        [_windowBar.topAnchor constraintEqualToAnchor:_contentStack.topAnchor],
-        [_windowBar.leadingAnchor constraintEqualToAnchor:_contentStack.leadingAnchor],
-        [_windowBar.trailingAnchor constraintEqualToAnchor:_contentStack.trailingAnchor],
-    ]];
+    else
+    {
+        if(NXWindowServer.shared.presentationState != NXWindowServerPresentationStateDefault)
+        {
+            [_windowBar changeFocus:NO];
+        }
+        
+        [_contentStack addArrangedSubview:_windowBar];
+        
+        [NSLayoutConstraint activateConstraints:@[
+            [_windowBar.topAnchor constraintEqualToAnchor:_contentStack.topAnchor],
+            [_windowBar.leadingAnchor constraintEqualToAnchor:_contentStack.leadingAnchor],
+            [_windowBar.trailingAnchor constraintEqualToAnchor:_contentStack.trailingAnchor],
+        ]];
+    }
     
     [self addChildViewController:_session];
     _session.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -118,7 +126,11 @@
     [_contentStack sendSubviewToBack:_session.view];
     [_session didMoveToParentViewController:self];
     
-    if(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad)
+    if(NXHostPresentsGuestEdgeToEdge())
+    {
+        /* The guest fills the phone. There is no title bar to pull down. */
+    }
+    else if(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad)
     {
         /* this is to move the window obviously */
         UIPanGestureRecognizer *moveGesture =
@@ -158,8 +170,11 @@
         [_windowBar addGestureRecognizer:pullDownGesture];
     }
     
-    _contentStack.layer.borderWidth = 0.5;
-    _contentStack.layer.borderColor = UIColor.systemGray3Color.CGColor;
+    if(!NXHostPresentsGuestEdgeToEdge())
+    {
+        _contentStack.layer.borderWidth = 0.5;
+        _contentStack.layer.borderColor = UIColor.systemGray3Color.CGColor;
+    }
     
     [self updateOriginalFrame];
     self.view.alpha = 0.0;

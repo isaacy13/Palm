@@ -121,6 +121,14 @@ Six concurrent `swift::performFrontend` calls share one in-process plugin server
 
 A full GuideAI compile is one process using most of a core for many minutes. iOS has logged a CPU-usage resource report for PalmHost (`action taken: none`) and has then ended the process around twelve minutes with no exception log. The Mac sees the TCP connection close with no JSON line. Cache hits are what keep a repeat build inside that window.
 
+### Why the screen shows a miss
+
+A hit is the detail line `cached <module> <file>`. `diagnostics ( )` under a filename means that file was compiled. The counter always starts at `0 / total` and counts both. A moving counter is not a cache hit.
+
+The object the cache checks is not `Cache/Palm/<Module>.o`. The Swift driver splits a module into one object per file and writes those under the app container's `tmp` (the link line shows `tmp/<Module>-<hash>.o`). `.palmflags` sits next to that object. iOS may delete `tmp` when PalmHost is not running. After each file in `tmp` compiles, PalmHost copies the object and `.palmflags` to `Documents/Cache/Palm/objects`, which survives the process. The next compile copies those files back into `tmp` before the driver looks for them. The log line is `restored N objects into tmp`. A hit still requires the same compiler arguments. A reinstall can change the driver's object filename because that hash includes the container path, and the restored name then does not match.
+
+A file also misses when the stamp does not match, even if the object is still there. The stamp is a hash of the full `swiftc` argument list plus the modification times of the four repaired SDK interfaces (MapKit, FoundationModels, HealthKit, AVAudioSession). A `build-and-run` after a `build-run-and-tests` misses the app sources because only the test request adds `-enable-testing` and `-emit-module`. A repair that rewrites one of those interfaces changes every file's stamp. The container UUID in a path does not, and a rewrite that leaves the bytes unchanged does not bump the input's modification time.
+
 ### No on-device tests
 
 `@Test` and `#expect` expand through `TestingMacros`. The only `libTestingMacros.dylib` Xcode ships is a macOS binary (`LC_BUILD_VERSION` platform `MACOS`). It links the Mac `libswiftCore` and the Mac SwiftSyntax libraries. Copying that file onto the phone does not change the platform load command, and iOS `dyld` rejects it. A small PalmAdd target got past `import Testing` and stopped on the missing plugin. The same is true of `SwiftUIMacros` and `FoundationModelsMacros`: the copies under the iPhoneOS platform directory are still host plugins.

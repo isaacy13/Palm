@@ -26,6 +26,12 @@
 #import <UIKit/UIKit.h>
 #import <LindChain/WindowServer/Window/NXWindow.h>
 
+/// PalmHost shows one guest. The build log is not a place to return to.
+static inline BOOL NXHostPresentsGuestEdgeToEdge(void)
+{
+    return [[NSBundle mainBundle].bundleIdentifier isEqualToString:@"com.onexengineering.PalmHost"];
+}
+
 typedef UInt64 NXWindowServerPresentationState NS_TYPED_ENUM;
 static NXWindowServerPresentationState const NXWindowServerPresentationStateDefault = 0;
 static NXWindowServerPresentationState const NXWindowServerPresentationStateFullScreen = 1;

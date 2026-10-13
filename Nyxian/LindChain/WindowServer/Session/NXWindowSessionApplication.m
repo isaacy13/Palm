@@ -106,9 +106,15 @@ static os_unfair_lock g_window_rects_lock = OS_UNFAIR_LOCK_INIT;
     _scene = scene;
     
     [scene updateSettingsWithBlock:^(UIMutableApplicationSceneSettings *settings) {
-        UIEdgeInsets insets = (self.isFullscreen) ? NXWindowServer.shared.safeAreaInsets : UIEdgeInsetsZero;
-        
-        insets.top = 10;
+        UIEdgeInsets insets = UIEdgeInsetsZero;
+        if(NXHostPresentsGuestEdgeToEdge() || self.isFullscreen)
+        {
+            insets = NXWindowServer.shared.safeAreaInsets;
+        }
+        if(!NXHostPresentsGuestEdgeToEdge())
+        {
+            insets.top = 10;
+        }
         
         switch(settings.interfaceOrientation)
         {
@@ -175,7 +181,12 @@ static os_unfair_lock g_window_rects_lock = OS_UNFAIR_LOCK_INIT;
         if(UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPhone)
         {
             UIEdgeInsets insets = settings.safeAreaInsetsPortrait;
-            insets.bottom = NXWindowServer.shared.safeAreaInsets.bottom;
+            UIEdgeInsets host = NXWindowServer.shared.safeAreaInsets;
+            insets.bottom = host.bottom;
+            if(NXHostPresentsGuestEdgeToEdge())
+            {
+                insets.top = host.top;
+            }
             settings.safeAreaInsetsPortrait = insets;
         }
     };

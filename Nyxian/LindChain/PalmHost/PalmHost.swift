@@ -187,6 +187,11 @@ final class NyxianToolchain: DeviceToolchain {
         compileFailure = nil
         linkJobs.removeAll()
         compiledObjects.removeAll()
+        let store = home.appendingPathComponent("Documents/Cache/Palm/objects")
+        let restored = (try? restoreTemporaryObjects(from: store, to: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true))) ?? 0
+        if restored > 0 {
+            log.append("restored \(restored) objects into tmp")
+        }
         let output = URL(fileURLWithPath: plan.linkJob.output)
         try FileManager.default.createDirectory(at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         var pending: [(module: String, job: MDKJob)] = []
@@ -376,6 +381,9 @@ final class NyxianToolchain: DeviceToolchain {
         var error: NSString?
         let bundleURL = URL(fileURLWithPath: plan.linkJob.output).deletingLastPathComponent()
         try writeBundleInfo(plan, bundle: bundleURL)
+        if let identifier = plan.signingProfileIdentifier {
+            log.append("profile \(identifier)")
+        }
         try bundleLinkedFrameworks(plan, into: bundleURL, log: log)
         let bundle = bundleURL.path
         let pid = PalmLaunchBundle(plan.bundleIdentifier, bundle, &error)
@@ -458,6 +466,9 @@ final class NyxianToolchain: DeviceToolchain {
         info["CFBundleExecutable"] = name
         let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try data.write(to: bundle.appendingPathComponent("Info.plist"))
+        if let profile = plan.provisioningProfile {
+            try profile.write(to: bundle.appendingPathComponent("embedded.mobileprovision"))
+        }
     }
 
     private func signFile(_ path: String, plan: BuildPlan, log: ControlLog) throws {
@@ -502,6 +513,7 @@ final class NyxianToolchain: DeviceToolchain {
             stateLock.unlock()
             logLine(log, "cached \(module) \(primary)")
             PalmHostStatus.shared.finishedFile(module: module, file: primary, cached: true)
+            storeTemporaryObject(cached)
             return true
         }
         PalmHostStatus.shared.compiling(module: module, file: primary)
@@ -520,6 +532,7 @@ final class NyxianToolchain: DeviceToolchain {
         if ok, let path = emittedObjectPath(arguments: job.arguments, outputFilePath: job.outputFileURL?.path) {
             compiledObjects.append(path)
             writeStamp(for: job, output: path)
+            storeTemporaryObject(path)
         } else if !ok {
             let message = items.map { $0.message ?? "" }.joined(separator: "\n")
             compileFailure = message.isEmpty ? "compile failed" : message
@@ -560,6 +573,12 @@ final class NyxianToolchain: DeviceToolchain {
     private func writeStamp(for job: MDKJob, output: String) {
         let stamp = compileArgumentStamp([compileStampPrefix] + job.arguments)
         try? stamp.write(toFile: output + ".palmflags", atomically: true, encoding: .utf8)
+    }
+
+    private func storeTemporaryObject(_ output: String) {
+        let home = URL(fileURLWithPath: "/private" + NSHomeDirectory())
+        let store = home.appendingPathComponent("Documents/Cache/Palm/objects")
+        try? persistTemporaryObject(output, temporaryDirectory: NSTemporaryDirectory(), storeDirectory: store)
     }
 
     private func fileDate(_ path: String) -> Date? {

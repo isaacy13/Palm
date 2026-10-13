@@ -49,6 +49,9 @@ public struct BuildPlan: Codable, Equatable {
     public var bundleResources: [String] = []
     /// `InfoOverrides.plist` plus `INFOPLIST_KEY_*` usage strings for the signed app.
     public var infoPlist: [String: PlistValue] = [:]
+    /// Copied into the guest bundle as `embedded.mobileprovision`.
+    public var provisioningProfile: Data? = nil
+    public var signingProfileIdentifier: String? = nil
 
     public var descriptionForLog: String {
         var lines: [String] = []
@@ -292,93 +295,35 @@ public struct ProjectDriver {
         )
     }
 
-func launchInfoDictionary(settings: [String: String], projectDirectory: URL, moduleName: String) -> [String: PlistValue] {
-    var variables = settings
-    variables["PRODUCT_MODULE_NAME"] = settings["PRODUCT_MODULE_NAME"] ?? moduleName
-    variables["TARGET_NAME"] = settings["TARGET_NAME"] ?? moduleName
-    var info: [String: PlistValue] = [:]
-    if let relative = settings["INFOPLIST_FILE"] {
-        let url = projectDirectory.appendingPathComponent(relative)
-        if let overrides = try? PlistValue.read(from: url) {
-            info = overrides.mapValues { expandPlistVariables($0, variables: variables) }
+    /// Bundle id, entitlements file, and Info.plist from the project, without compiling.
+    public func signingInputs(project: URL, target name: String) throws -> SigningInputs {
+        let xcodeproj = project.pathExtension == "xcodeproj"
+            ? project
+            : project.appendingPathComponent("project.pbxproj").deletingLastPathComponent()
+        let pbxproj = xcodeproj.appendingPathComponent("project.pbxproj")
+        guard FileManager.default.fileExists(atPath: pbxproj.path) else {
+            throw ControlError.missingProject(pbxproj.path)
         }
-    }
-    for (key, value) in settings where key.hasPrefix("INFOPLIST_KEY_") && !key.contains("[") {
-        let name = String(key.dropFirst("INFOPLIST_KEY_".count))
-        if value == "YES" {
-            info[name] = .bool(true)
-        } else if value == "NO" {
-            info[name] = .bool(false)
-        } else {
-            info[name] = .string(expandPlistText(value, variables: variables))
+        let projectDirectory = xcodeproj.deletingLastPathComponent()
+        let text = try String(contentsOf: pbxproj, encoding: .utf8)
+        let objects = try PbxParser.objects(in: text)
+        guard let target = nativeTarget(named: name, objects: objects) else {
+            throw ControlError.missingTarget(name)
         }
+        let settings = buildSettings(for: target, objects: objects)
+        let bundleID = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? "app.palm.\(name)"
+        func existing(_ key: String) -> String? {
+            guard let relative = settings[key] else { return nil }
+            let url = projectDirectory.appendingPathComponent(relative)
+            return FileManager.default.fileExists(atPath: url.path) ? url.path : nil
+        }
+        return SigningInputs(
+            bundleIdentifier: bundleID,
+            entitlementsPath: existing("CODE_SIGN_ENTITLEMENTS"),
+            infoPlistPath: existing("INFOPLIST_FILE")
+        )
     }
-    return info
-}
 
-func expandPlistVariables(_ value: PlistValue, variables: [String: String]) -> PlistValue {
-    switch value {
-    case .string(let text):
-        return .string(expandPlistText(text, variables: variables))
-    case .array(let values):
-        return .array(values.map { expandPlistVariables($0, variables: variables) })
-    case .dictionary(let values):
-        return .dictionary(values.mapValues { expandPlistVariables($0, variables: variables) })
-    default:
-        return value
-    }
-}
-
-func expandPlistText(_ text: String, variables: [String: String]) -> String {
-    var result = text
-    for (key, value) in variables where !value.contains("$(") {
-        result = result.replacingOccurrences(of: "$(\(key))", with: value)
-    }
-    return result
-}
-
-func compiledDataModels(under root: URL) -> [String] {
-    guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
-        return []
-    }
-    let skip: Set<String> = [".build", "DerivedData", "Checkouts", "GuideAIUnitTests", "GuideAISnapshotTests", "GuideAIWatch"]
-    var found: [String] = []
-    for case let url as URL in enumerator {
-        if skip.contains(url.lastPathComponent) {
-            enumerator.skipDescendants()
-            continue
-        }
-        guard url.pathExtension == "xcdatamodeld" else { continue }
-        let compiled = url.deletingPathExtension().appendingPathExtension("momd")
-        var isDirectory: ObjCBool = false
-        if FileManager.default.fileExists(atPath: compiled.path, isDirectory: &isDirectory), isDirectory.boolValue {
-            found.append(compiled.path)
-        }
-        enumerator.skipDescendants()
-    }
-    return found.sorted()
-}
-
-func copyBundleResources(_ paths: [String], nextTo executable: String) throws -> [String] {
-    let bundle = URL(fileURLWithPath: executable).deletingLastPathComponent()
-    let files = FileManager.default
-    try files.createDirectory(at: bundle, withIntermediateDirectories: true)
-    var copied: [String] = []
-    for path in paths {
-        let source = URL(fileURLWithPath: path)
-        let destination = bundle.appendingPathComponent(source.lastPathComponent)
-        if files.fileExists(atPath: destination.path) {
-            try files.removeItem(at: destination)
-        }
-        do {
-            try files.copyItem(at: source, to: destination)
-        } catch {
-            throw ControlError.linkFailed("could not copy \(source.lastPathComponent) into \(bundle.path)")
-        }
-        copied.append(source.lastPathComponent)
-    }
-    return copied
-}
 
     private func swiftJob(moduleName: String,
                           sources: [URL],
@@ -494,6 +439,94 @@ func copyBundleResources(_ paths: [String], nextTo executable: String) throws ->
         let name = source.deletingPathExtension().lastPathComponent
         return CompilerJob(tool: "clang", moduleName: name, sources: [source.path], arguments: arguments)
     }
+    func compiledDataModels(under root: URL) -> [String] {
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return []
+        }
+        let skip: Set<String> = [".build", "DerivedData", "Checkouts", "GuideAIUnitTests", "GuideAISnapshotTests", "GuideAIWatch"]
+        var found: [String] = []
+        for case let url as URL in enumerator {
+            if skip.contains(url.lastPathComponent) {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard url.pathExtension == "xcdatamodeld" else { continue }
+            let compiled = url.deletingPathExtension().appendingPathExtension("momd")
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: compiled.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                found.append(compiled.path)
+            }
+            enumerator.skipDescendants()
+        }
+        return found.sorted()
+    }
+
+    func copyBundleResources(_ paths: [String], nextTo executable: String) throws -> [String] {
+        let bundle = URL(fileURLWithPath: executable).deletingLastPathComponent()
+        let files = FileManager.default
+        try files.createDirectory(at: bundle, withIntermediateDirectories: true)
+        var copied: [String] = []
+        for path in paths {
+            let source = URL(fileURLWithPath: path)
+            let destination = bundle.appendingPathComponent(source.lastPathComponent)
+            if files.fileExists(atPath: destination.path) {
+                try files.removeItem(at: destination)
+            }
+            do {
+                try files.copyItem(at: source, to: destination)
+            } catch {
+                throw ControlError.linkFailed("could not copy \(source.lastPathComponent) into \(bundle.path)")
+            }
+            copied.append(source.lastPathComponent)
+        }
+        return copied
+    }
+
+}
+
+func launchInfoDictionary(settings: [String: String], projectDirectory: URL, moduleName: String) -> [String: PlistValue] {
+    var variables = settings
+    variables["PRODUCT_MODULE_NAME"] = settings["PRODUCT_MODULE_NAME"] ?? moduleName
+    variables["TARGET_NAME"] = settings["TARGET_NAME"] ?? moduleName
+    var info: [String: PlistValue] = [:]
+    if let relative = settings["INFOPLIST_FILE"] {
+        let url = projectDirectory.appendingPathComponent(relative)
+        if let overrides = try? PlistValue.read(from: url) {
+            info = overrides.mapValues { expandPlistVariables($0, variables: variables) }
+        }
+    }
+    for (key, value) in settings where key.hasPrefix("INFOPLIST_KEY_") && !key.contains("[") {
+        let name = String(key.dropFirst("INFOPLIST_KEY_".count))
+        if value == "YES" {
+            info[name] = .bool(true)
+        } else if value == "NO" {
+            info[name] = .bool(false)
+        } else {
+            info[name] = .string(expandPlistText(value, variables: variables))
+        }
+    }
+    return info
+}
+
+public func expandPlistVariables(_ value: PlistValue, variables: [String: String]) -> PlistValue {
+    switch value {
+    case .string(let text):
+        return .string(expandPlistText(text, variables: variables))
+    case .array(let values):
+        return .array(values.map { expandPlistVariables($0, variables: variables) })
+    case .dictionary(let values):
+        return .dictionary(values.mapValues { expandPlistVariables($0, variables: variables) })
+    default:
+        return value
+    }
+}
+
+func expandPlistText(_ text: String, variables: [String: String]) -> String {
+    var result = text
+    for (key, value) in variables where !value.contains("$(") {
+        result = result.replacingOccurrences(of: "$(\(key))", with: value)
+    }
+    return result
 }
 
 private struct PackageUnit {
