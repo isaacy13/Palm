@@ -777,15 +777,6 @@ final class ControlTests: XCTestCase {
         XCTAssertEqual(names, ["PartyMinimumSpotsForVotingExactEdgeTests", "StreetSpeedLimitTests"])
     }
 
-    func testCompileThreadCountClampsToMaximumCores() {
-        XCTAssertEqual(compileThreadCount(requested: nil, cores: 6), 6)
-        XCTAssertEqual(compileThreadCount(requested: 0, cores: 6), 6)
-        XCTAssertEqual(compileThreadCount(requested: -3, cores: 6), 6)
-        XCTAssertEqual(compileThreadCount(requested: 2, cores: 6), 2)
-        XCTAssertEqual(compileThreadCount(requested: 40, cores: 6), 6)
-        XCTAssertEqual(compileThreadCount(requested: nil, cores: 0), 1)
-    }
-
     func testGitPullChecksOutTheRequestedBranch() throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("palm-git-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

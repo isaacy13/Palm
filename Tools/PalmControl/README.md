@@ -9,7 +9,7 @@ flowchart TD
   agent["Mac agent runs palmctl"]
   wire["One JSON line over TCP 8741. The host is the devicectl tunnel IP."]
   host["PalmHost runs ProjectDriver on the project already on the phone"]
-  compile["Read the pbxproj. Emit swiftc and clang jobs, one file at a time. Reuse the object when it exists, every input is older, and .palmflags matches."]
+  compile["Read the pbxproj. One swiftc or clang invocation per file. Reuse the object when it exists, every input is older, and .palmflags matches."]
   signed["Link and sign inside PalmHost"]
   kind{"Request kind"}
   buildStop["build stops"]
@@ -22,7 +22,7 @@ flowchart TD
   kind --> tested
 ```
 
-`palmctl` does not compile, and ProjectDriver does not call `xcodebuild`. The log line `compile threads N` is only a count. Several Swift frontends at once hang on one in-process plugin server. One frontend with several primary files fails because each file has its own `-emit-module-path`. A parallel clang batch segfaulted the host. The `.palmflags` stamp drops the data-container UUID. A rewrite that leaves the bytes unchanged keeps the file's modification time. Only `build-run-and-tests` with named `--test` files stages `Testing.swiftmodule` and emits `GuideAI.swiftmodule` for `@testable import`. A plain `build` does not. Leave `--repository` off. The phone uses the tree already in `Documents/Projects`.
+`palmctl` does not compile, and ProjectDriver does not call `xcodebuild`. Swift and Clang each run one compiler invocation at a time. Several Swift frontends at once hang on one in-process plugin server. One frontend with several primary files fails because each file has its own `-emit-module-path`. A parallel clang batch segfaulted the host. The `.palmflags` stamp drops the data-container UUID. A rewrite that leaves the bytes unchanged keeps the file's modification time. Only `build-run-and-tests` with named `--test` files stages `Testing.swiftmodule` and emits `GuideAI.swiftmodule` for `@testable import`. A plain `build` does not. Leave `--repository` off. The phone uses the tree already in `Documents/Projects`.
 
 | Request | Stages | Result |
 |---|---|---|
@@ -112,12 +112,6 @@ A name that matches no test file, together with `--ui`, skips that binary and st
 The guest window is hosted inside PalmHost. `PALM_HOST_BUNDLE_ID=com.onexengineering.PalmHost` makes the Mac check open PalmHost. Opening the guest bundle id foregrounds the real SpringBoard app with the same id.
 
 `agent-device` signs its runner with `AGENT_DEVICE_IOS_TEAM_ID`. Leave `AGENT_DEVICE_IOS_PROVISIONING_PROFILE` unset so Xcode uses Automatic signing. Find the team id with `security find-identity -v -p codesigning`.
-
-## Compile threads
-
-Omit `--threads` and the logged count is every performance core. Pass `--threads N` to log a smaller count, clamped to at least 1 and at most that core count. The log line is `compile threads N`.
-
-Clang and Swift compile one file at a time. A parallel clang batch segfaulted the host. Several Swift frontends in this process share one plugin server and never finish a file. Putting those files into one frontend fails immediately, because each file has its own `-emit-module-path`.
 
 ## While it runs
 

@@ -37,8 +37,6 @@ public struct ControlRequest: Codable, Equatable {
     public var target: String
     public var tests: [String]
     public var ui: [UICheck]
-    /// Compile width. Nil uses every performance core on the phone.
-    public var threads: Int?
 
     public init(kind: ControlRequestKind,
                 branch: String,
@@ -46,8 +44,7 @@ public struct ControlRequest: Codable, Equatable {
                 project: String,
                 target: String,
                 tests: [String] = [],
-                ui: [UICheck] = [],
-                threads: Int? = nil) {
+                ui: [UICheck] = []) {
         self.kind = kind
         self.branch = branch
         self.repository = repository
@@ -55,7 +52,6 @@ public struct ControlRequest: Codable, Equatable {
         self.target = target
         self.tests = tests
         self.ui = ui
-        self.threads = threads
     }
 
     /// Stages this request is allowed to start, in order.
@@ -92,14 +88,6 @@ extension ControlRequestKind {
     public var requestsTests: Bool {
         self == .buildRunAndTests
     }
-}
-
-/// Width of an on-device compile. A missing or non-positive request uses every
-/// performance core. A larger request clamps to that maximum.
-public func compileThreadCount(requested: Int?, cores: Int) -> Int {
-    let maximum = max(cores, 1)
-    guard let requested, requested > 0 else { return maximum }
-    return min(requested, maximum)
 }
 
 public struct RunningProcess: Codable, Equatable {
