@@ -210,8 +210,6 @@ final class NyxianToolchain: DeviceToolchain {
                 pending.append((job.moduleName, runnable))
             }
         }
-        let threads = compileThreadCount(requested: plan.compileThreads, cores: Int(PalmMaximumCompileThreads()))
-        log.append("compile threads \(threads)")
         PalmHostStatus.shared.beginCompile(total: pending.count)
         var clangBatch: [(module: String, job: MDKJob)] = []
         var swiftBatch: [(module: String, job: MDKJob)] = []
@@ -222,7 +220,7 @@ final class NyxianToolchain: DeviceToolchain {
                 modules[frontendKey(item.job)] = item.module
             }
             let jobs = batch.map(\.job)
-            let ok = PalmRunJobs(jobs, parallel && jobs.count > 1, CFIndex(threads)) { [self] job in
+            let ok = PalmRunJobs(jobs, parallel && jobs.count > 1, 1) { [self] job in
                 guard let job else { return false }
                 return performFrontend(modules[frontendKey(job)] ?? "", job, log: log)
             }
@@ -234,13 +232,15 @@ final class NyxianToolchain: DeviceToolchain {
             let batch = clangBatch
             clangBatch.removeAll()
             // A parallel clang batch in this process segfaulted the host (signal 11).
-            // Clang stays serial. Swift files in one module use `threads`.
             try runBatch(batch, parallel: false)
         }
         func flushSwift() throws {
             let batch = swiftBatch
             swiftBatch.removeAll()
-            try runBatch(batch, parallel: threads > 1)
+            // One Swift frontend at a time. Six frontends share the plugin server and
+            // hang. One frontend with six primary files fails immediately because each
+            // file has its own -emit-module-path.
+            try runBatch(batch, parallel: false)
         }
         for item in pending {
             if item.job.type == .compiler {

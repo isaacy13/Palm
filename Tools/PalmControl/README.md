@@ -2,6 +2,28 @@
 
 Read this page before driving a build. PalmHost on the iPhone compiles, links, and signs with Nyxian's on-device toolchain. `palmctl` on the Mac sends exactly one request over TCP. A later stage does not run unless that request asked for it.
 
+## How a request runs
+
+```mermaid
+flowchart TD
+  agent["Mac agent runs palmctl"]
+  wire["One JSON line over TCP 8741. The host is the devicectl tunnel IP."]
+  host["PalmHost runs ProjectDriver on the project already on the phone"]
+  compile["Read the pbxproj. One swiftc or clang invocation per file. Reuse the object when it exists, every input is older, and .palmflags matches."]
+  signed["Link and sign inside PalmHost"]
+  kind{"Request kind"}
+  buildStop["build stops"]
+  launch["build-and-run starts LiveProcess.appex, which dlopens the signed Mach-O. The window is a scene inside PalmHost."]
+  tested["build-run-and-tests does that launch, then Mac UI checks"]
+
+  agent --> wire --> host --> compile --> signed --> kind
+  kind --> buildStop
+  kind --> launch
+  kind --> tested
+```
+
+`palmctl` does not compile, and ProjectDriver does not call `xcodebuild`. Swift and Clang each run one compiler invocation at a time. Several Swift frontends at once hang on one in-process plugin server. One frontend with several primary files fails because each file has its own `-emit-module-path`. A parallel clang batch segfaulted the host. The `.palmflags` stamp drops the data-container UUID. A rewrite that leaves the bytes unchanged keeps the file's modification time. On-device unit tests are not compiled: `@Test` needs `TestingMacros`, and that plugin is a macOS library. Leave `--repository` off. The phone uses the tree already in `Documents/Projects`.
+
 | Request | Stages | Result |
 |---|---|---|
 | `build` | pull, compile, link, sign | Logs and success or failure. No launch. |
@@ -67,8 +89,6 @@ export AGENT_DEVICE_IOS_BUNDLE_ID=com.example.agentdevice.runner
   --branch <branch> \
   --project ios/GuideAI.xcodeproj \
   --target GuideAI \
-  --test PartyMinimumSpotsForVotingExactEdgeTests \
-  --test StreetSpeedLimitTests \
   --ui 'wait:Welcome to GuideAI'
 ```
 
@@ -81,22 +101,12 @@ export AGENT_DEVICE_IOS_BUNDLE_ID=com.example.agentdevice.runner
 | `press` | Press a target, then settle |
 | `click` | Click a target, then settle |
 
-Repeat `--test`, or pass comma-separated names (`--test One,Two`), to compile only those test-target files. The name is the filename with or without the extension. Omit `--test` and the phone compiles every test file. Do not omit it unless you mean that.
-
-GuideAI unit tests that `@testable import GuideAI` do not compile as the on-device test binary. A name that matches no test file, together with `--ui`, skips that binary and still runs the Mac checks against the launch.
-
 The guest window is hosted inside PalmHost. `PALM_HOST_BUNDLE_ID=com.onexengineering.PalmHost` makes the Mac check open PalmHost. Opening the guest bundle id foregrounds the real SpringBoard app with the same id.
 
 `agent-device` signs its runner with `AGENT_DEVICE_IOS_TEAM_ID`. Leave `AGENT_DEVICE_IOS_PROVISIONING_PROFILE` unset so Xcode uses Automatic signing. Find the team id with `security find-identity -v -p codesigning`.
-
-## Compile threads
-
-Omit `--threads` and the phone uses every performance core. That default ignores the Nyxian settings stepper. Pass `--threads N` to use fewer. The phone clamps `N` to at least 1 and at most the performance-core count. The log line is `compile threads N`.
-
-Swift files in one module run together when that count is greater than 1. Clang stays serial. A parallel clang batch in this process segfaulted the host.
 
 ## While it runs
 
 Stdout is fully buffered when redirected, so a log file stays empty until `palmctl` exits. An `ESTABLISHED` connection to port 8741 means the session is live. Signing the GuideAI binary moves a large payload and takes a few minutes.
 
-Reinstall PalmHost only when the phone binary itself changed. A new data container changes absolute paths stored in the compile cache, and the next build compiles every file again.
+Reinstall PalmHost only when the phone binary itself changed. Unchanged rewritten sources are cache hits: a rewrite that would write the same bytes leaves the file's modification time alone. A reinstall that only changes the container UUID reuses objects that are still on disk.

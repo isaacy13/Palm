@@ -6,7 +6,7 @@ import Foundation
 public func compileArgumentStamp(_ arguments: [String]) -> String {
     var hash: UInt64 = 1469598103934665603
     for argument in arguments {
-        for byte in argument.utf8 {
+        for byte in normalizingDataContainerUUID(argument).utf8 {
             hash ^= UInt64(byte)
             hash &*= 1099511628211
         }
@@ -14,6 +14,18 @@ public func compileArgumentStamp(_ arguments: [String]) -> String {
     }
     return String(hash, radix: 16)
 }
+
+/// PalmHost's data container UUID changes on reinstall even when the files
+/// were moved intact. Drop that one path segment so the compile stamp matches.
+public func normalizingDataContainerUUID(_ text: String) -> String {
+    guard let regex = dataContainerUUID else { return text }
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "/Containers/Data/Application/")
+}
+
+private let dataContainerUUID = try? NSRegularExpression(
+    pattern: #"/Containers/Data/Application/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/"#
+)
 
 public func compileInputPaths(arguments: [String], declaredInputs: [String], output: String) -> [String] {
     var seen = Set<String>()
@@ -264,14 +276,12 @@ public struct ControlExecutor<Toolchain: DeviceToolchain> {
         case .compile:
             let root = request.repository == nil ? sourceRoot : context.workRoot.appendingPathComponent("src")
             let project = root.appendingPathComponent(request.project)
-            var built = try driver.plan(
+            let built = try driver.plan(
                 project: project,
                 target: request.target,
                 kind: request.kind,
-                tests: request.tests,
                 context: context
             )
-            built.compileThreads = request.threads
             if request.kind != .buildRunAndTests && built.includesTests {
                 throw ControlError.stageNotRequested(.test)
             }
