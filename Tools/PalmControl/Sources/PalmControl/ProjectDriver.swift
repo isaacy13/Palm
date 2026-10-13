@@ -115,7 +115,7 @@ public struct DriverContext: Equatable {
 public struct ProjectDriver {
     public init() {}
 
-    public func plan(project: URL, target name: String, kind: ControlRequestKind, tests: [String], context: DriverContext) throws -> BuildPlan {
+    public func plan(project: URL, target name: String, kind: ControlRequestKind, context: DriverContext) throws -> BuildPlan {
         let projectURL = project.hasDirectoryPath || project.pathExtension == "xcodeproj"
             ? project
             : project
@@ -167,13 +167,8 @@ public struct ProjectDriver {
         }
 
         let frameworkSearchPaths = binaryFrameworkSearchPaths(under: projectDirectory)
-        let includeTests = kind.requestsTests
-        let testSources = includeTests
-            ? testFiles(named: tests, objects: objects, projectDirectory: projectDirectory, fallback: sources.swift)
-            : []
-        let testExecutable = includeTests && !testSources.isEmpty
-            ? context.workRoot.appendingPathComponent("\(name)Tests").path
-            : nil
+        let testSources: [URL] = []
+        let testExecutable: String? = nil
 
         let packageModules = context.workRoot.appendingPathComponent("PackageModules")
         let binaryModules = binaryModuleNames(in: frameworkSearchPaths)
@@ -259,23 +254,6 @@ public struct ProjectDriver {
                 output: appOutput
             ))
         }
-        if includeTests && !testSources.isEmpty {
-            compileJobs.append(swiftJob(
-                moduleName: sanitizedModule(name) + "Tests",
-                sources: try sourcesWithIsolatedDeinits(try sourcesWithoutBindingMethodSetters(try sourcesWithCrossImports(try sourcesWithoutEntryMacros(try sourcesWithoutGenerableMacros(try sourcesWithoutPreviews(testSources, context: context), context: context), context: context), sdkRoot: context.sdkRoot, context: context), context: context), context: context, enabled: usesIsolatedDeinits(settings)),
-                frameworks: appFrameworks,
-                deployment: deployment,
-                context: context,
-                overlayRoot: overlaid.isEmpty ? nil : overlayRoot,
-                frameworkSearchPaths: moduleSearchPaths,
-                emitModule: false,
-                output: testExecutable,
-                moduleMaps: moduleMaps,
-                libraries: linkExtras.libraries,
-                extraArguments: swiftLanguageArguments(from: settings)
-            ))
-        }
-
         var linkArguments = ["-o", appOutput]
         linkArguments.append(contentsOf: packageObjects)
         for framework in appFrameworks {
@@ -307,7 +285,7 @@ public struct ProjectDriver {
             remotePackages: remote.sorted(),
             testSources: testSources.map { $0.path },
             testExecutable: testExecutable,
-            includesTests: includeTests,
+            includesTests: false,
             preparesLaunch: kind.requestsLaunch,
             bundleResources: compiledDataModels(under: projectDirectory),
             infoPlist: launchInfoDictionary(settings: settings, projectDirectory: projectDirectory, moduleName: name)
@@ -2353,25 +2331,6 @@ private func remotePackageURLs(objects: [String: PbxValue]) -> [String] {
         }
     }
     return urls
-}
-
-private func testFiles(named tests: [String], objects: [String: PbxValue], projectDirectory: URL, fallback: [URL]) -> [URL] {
-    var pool: [URL] = []
-    for value in objects.values {
-        guard let object = value.object,
-              object["isa"]?.string == "PBXNativeTarget",
-              let product = object["productType"]?.string,
-              product.contains("test") else { continue }
-        pool.append(contentsOf: sourceFiles(for: object, objects: objects, projectDirectory: projectDirectory).swift)
-    }
-    if tests.isEmpty { return pool }
-    let wanted = Set(tests)
-    let matched = pool.filter { url in
-        wanted.contains(url.deletingPathExtension().lastPathComponent) || wanted.contains(url.lastPathComponent) || wanted.contains(url.path)
-    }
-    return matched.isEmpty ? fallback.filter { url in
-        wanted.contains(url.deletingPathExtension().lastPathComponent)
-    } : matched
 }
 
 private func sanitizedModule(_ name: String) -> String {

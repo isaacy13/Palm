@@ -380,32 +380,25 @@ final class ControlTests: XCTestCase {
         XCTAssertFalse(recording.calls.contains("test"))
 
         recording.calls.removeAll()
-        let tested = executor.run(request(.buildRunAndTests, tests: ["SampleTests"], ui: [UICheck(name: "home", action: "snapshot")]))
-        XCTAssertEqual(tested.stagesRun, [.pull, .compile, .link, .sign, .launch, .test])
+        let tested = executor.run(request(.buildRunAndTests, ui: [UICheck(name: "home", action: "snapshot")]))
+        XCTAssertEqual(tested.stagesRun, [.pull, .compile, .link, .sign, .launch])
         XCTAssertTrue(tested.launched)
-        XCTAssertEqual(recording.calls.last, "test")
-        XCTAssertTrue(tested.logs.contains("SampleTests.swift"))
+        XCTAssertFalse(recording.calls.contains("test"))
+        XCTAssertFalse(tested.logs.contains("SampleTests.swift"))
     }
 
-    func testUICheckRunsWhenTheNamedTestIsNotAnOnDeviceBinary() throws {
+    func testBuildRunAndTestsDoesNotCompileAnOnDeviceTestBinary() throws {
         let recording = RecordingToolchain()
         let executor = ControlExecutor(toolchain: recording, sourceRoot: fixtureRoot(), context: try makeContext())
         let tested = executor.run(request(
             .buildRunAndTests,
-            tests: ["palm-launch-visible"],
             ui: [UICheck(name: "Welcome to GuideAI", action: "wait")]
         ))
         XCTAssertTrue(tested.success)
         XCTAssertTrue(tested.launched)
-        XCTAssertEqual(tested.stagesRun, [.pull, .compile, .link, .sign, .launch, .test])
+        XCTAssertEqual(tested.stagesRun, [.pull, .compile, .link, .sign, .launch])
         XCTAssertFalse(recording.calls.contains("test"))
-        XCTAssertTrue(tested.logs.contains("ui checks run against pid 42"))
         XCTAssertFalse(tested.logs.contains("SampleTests.swift"))
-
-        recording.calls.removeAll()
-        let missing = executor.run(request(.buildRunAndTests, tests: ["palm-launch-visible"]))
-        XCTAssertTrue(recording.calls.contains("test"))
-        XCTAssertFalse(missing.logs.contains("ui checks run against pid"))
     }
 
     func testCompileFailureDoesNotLinkOrLaunch() throws {
@@ -472,7 +465,8 @@ final class ControlTests: XCTestCase {
             host: "127.0.0.1",
             port: port
         )
-        XCTAssertTrue(tested.stagesRun.contains(.test))
+        XCTAssertTrue(tested.launched)
+        XCTAssertFalse(tested.stagesRun.contains(.test))
         let agent = MacAgent { process, _ in
             XCTAssertEqual(process.pid, 42)
             return "ui snapshot home\n"
@@ -544,7 +538,7 @@ final class ControlTests: XCTestCase {
         }
         """.write(to: transcriptInterface, atomically: true, encoding: .utf8)
         let driver = ProjectDriver()
-        let build = try driver.plan(project: project, target: "GuideAI", kind: .build, tests: ["Ignored"], context: context)
+        let build = try driver.plan(project: project, target: "GuideAI", kind: .build, context: context)
         XCTAssertEqual(build.bundleIdentifier, "com.onexengineering.GuideAI")
         XCTAssertFalse(build.preparesLaunch)
         XCTAssertFalse(build.includesTests)
@@ -699,27 +693,10 @@ final class ControlTests: XCTestCase {
         XCTAssertTrue(build.linkJob.arguments.contains("-framework"))
         XCTAssertTrue(build.linkJob.arguments.contains("MapKit"))
 
-        let tested = try driver.plan(project: project, target: "GuideAI", kind: .buildRunAndTests, tests: [], context: context)
+        let tested = try driver.plan(project: project, target: "GuideAI", kind: .buildRunAndTests, context: context)
         XCTAssertTrue(tested.preparesLaunch)
-        XCTAssertTrue(tested.includesTests)
-        XCTAssertFalse(tested.testSources.isEmpty)
-        XCTAssertGreaterThan(tested.testSources.count, 2)
-    }
-
-    func testNamedTestsSelectOnlyThoseFiles() throws {
-        let project = URL(fileURLWithPath: "/Users/isaacyeang/src/GuideAI/ios/GuideAI.xcodeproj")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: project.path))
-        let subset = try ProjectDriver().plan(
-            project: project,
-            target: "GuideAI",
-            kind: .buildRunAndTests,
-            tests: ["PartyMinimumSpotsForVotingExactEdgeTests", "StreetSpeedLimitTests"],
-            context: try makeContext()
-        )
-        let names = Set(subset.testSources.map {
-            URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent
-        })
-        XCTAssertEqual(names, ["PartyMinimumSpotsForVotingExactEdgeTests", "StreetSpeedLimitTests"])
+        XCTAssertFalse(tested.includesTests)
+        XCTAssertTrue(tested.testSources.isEmpty)
     }
 
     func testGitPullChecksOutTheRequestedBranch() throws {

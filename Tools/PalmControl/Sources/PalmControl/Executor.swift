@@ -280,7 +280,6 @@ public struct ControlExecutor<Toolchain: DeviceToolchain> {
                 project: project,
                 target: request.target,
                 kind: request.kind,
-                tests: request.tests,
                 context: context
             )
             if request.kind != .buildRunAndTests && built.includesTests {

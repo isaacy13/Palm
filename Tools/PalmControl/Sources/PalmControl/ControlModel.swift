@@ -62,7 +62,7 @@ public struct ControlRequest: Codable, Equatable {
         case .buildAndRun:
             return [.pull, .compile, .link, .sign, .launch]
         case .buildRunAndTests:
-            return [.pull, .compile, .link, .sign, .launch, .test]
+            return [.pull, .compile, .link, .sign, .launch]
         }
     }
 
@@ -86,7 +86,7 @@ extension ControlRequestKind {
     }
 
     public var requestsTests: Bool {
-        self == .buildRunAndTests
+        false
     }
 }
 
