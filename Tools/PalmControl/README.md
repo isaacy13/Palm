@@ -110,3 +110,34 @@ The guest window is hosted inside PalmHost. `PALM_HOST_BUNDLE_ID=com.onexenginee
 Stdout is fully buffered when redirected, so a log file stays empty until `palmctl` exits. An `ESTABLISHED` connection to port 8741 means the session is live. Signing the GuideAI binary moves a large payload and takes a few minutes.
 
 Reinstall PalmHost only when the phone binary itself changed. Unchanged rewritten sources are cache hits: a rewrite that would write the same bytes leaves the file's modification time alone. A reinstall that only changes the container UUID reuses objects that are still on disk.
+
+## Limits
+
+The phone is one sandboxed app. It cannot `fork`, and `posix_spawn` of another executable returns `EPERM`. That rules out a pool of compiler processes, a device-side `git` checkout (`--repository`), and spawning a test executable. LiveProcess is the one extra process, and it is the guest window: PalmHost starts the appex, the appex `dlopen`s the signed Mach-O, and the UI is a FrontBoard scene inside PalmHost. It is not a SpringBoard app and it is not a second compiler.
+
+### One file at a time
+
+Six concurrent `swift::performFrontend` calls share one in-process plugin server. The registry hands back a single plugin list, and the send/wait slot is not locked across waiters, so a parallel Swift batch sits at 0 files until it is killed. The module-cache lock is keyed by pid, so waiters in the same process stall on each other. A parallel Clang batch segfaulted the host (signal 11). Putting several primary files in one frontend with `-enable-batch-mode` fails immediately: each file has its own `-emit-module-path`, module doc path, and source-info path, and the compiler returns no diagnostic when the primary-file list is empty. `-num-threads` is ignored in batch mode. Whole-module `-num-threads` only threads LLVM and rebuilds the module. Swift and Clang therefore compile one file at a time. `--threads` is not a flag.
+
+A full GuideAI compile is one process using most of a core for many minutes. iOS has logged a CPU-usage resource report for PalmHost (`action taken: none`) and has then ended the process around twelve minutes with no exception log. The Mac sees the TCP connection close with no JSON line. Cache hits are what keep a repeat build inside that window.
+
+### No on-device tests
+
+`@Test` and `#expect` expand through `TestingMacros`. The only `libTestingMacros.dylib` Xcode ships is a macOS binary (`LC_BUILD_VERSION` platform `MACOS`). It links the Mac `libswiftCore` and the Mac SwiftSyntax libraries. Copying that file onto the phone does not change the platform load command, and iOS `dyld` rejects it. A small PalmAdd target got past `import Testing` and stopped on the missing plugin. The same is true of `SwiftUIMacros` and `FoundationModelsMacros`: the copies under the iPhoneOS platform directory are still host plugins.
+
+XCTest UI tests launch a SpringBoard app through `XCUIApplication`. The guest window is not that app. Snapshot tests import `SnapshotTesting` and need a GuideAI module from the same compiler; that package is not checked out on the phone. `build-run-and-tests` does not compile a test target. It launches, and the Mac runs `--ui` checks with `agent-device` against the PalmHost window.
+
+### Why the SDK stays on iOS 26.5
+
+The phone OS is iOS 27. The compiler on the phone is Swift 6.4 (CoreCompiler). The iOS 27 SwiftUI interface describes `@State` with `SwiftUIMacros`. That plugin is a macOS dylib, including the file stored at `iPhoneOS.platform/.../host/plugins/libSwiftUIMacros.dylib` (it links `Foundation.framework/Versions/C/Foundation`). The phone cannot load it, so SwiftUI from the iOS 27 SDK does not typecheck on device. The 26.5 slice still describes `@State` as a property wrapper, which Swift 6.4 can load. The Mac's Xcode is already Swift 6.4. A release Xcode 27 is the same compiler and the same host plugins. It does not produce an iOS build of those plugins, and it does not put the 26.5 SwiftUI interface back.
+
+GuideAI is written against iOS 27 APIs, so the 26.5 interfaces are patched in the phone's SDK copy before compile:
+
+- `_MapKit_SwiftUI` uses `MapCamera` and `MapCameraPosition` in `Map` initializers and never declares them. The repair adds those stored types.
+- `FoundationModels.Transcript.Entry` stops at the iOS 26 cases. iOS 27 adds `reasoning`, and GuideAI typechecks that case inside `#available(iOS 27, *)`. The repair declares the case and the `Reasoning` struct.
+- `AVAudioSession.activateWithOptions` is marked unavailable on iOS in the 26.5 header. The iOS 27 SDK marks it available starting in iOS 27. GuideAI calls it inside `@available(iOS 27, *)`. The repair updates that availability.
+- HealthKit in 26.5 has no workout-zone types. iOS 27 adds `preferredWorkoutZoneConfiguration`. The repair declares it.
+
+`@Entry` and `@Generable` are expanded in the source before `swiftc` runs, because those macros are the same class of Mac-only plugin.
+
+The patched interfaces name symbols that the 26.5 SDK binaries do not export. The phone is running iOS 27, so those symbols exist in the system frameworks at runtime. The link passes `-undefined dynamic_lookup` so the 26.5 stubs do not fail the link, and the loader binds the symbols when the guest runs. `___isPlatformVersionAtLeast` is the other missing piece: the compiler emits it for availability checks, and the 26.5 SDK does not ship it. `Documents/lib/libclang_rt.ios.a` (copied from the Mac Clang) is added as `-lclang_rt.ios` when that archive is present.
