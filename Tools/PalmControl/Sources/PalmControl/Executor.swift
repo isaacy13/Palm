@@ -276,14 +276,13 @@ public struct ControlExecutor<Toolchain: DeviceToolchain> {
         case .compile:
             let root = request.repository == nil ? sourceRoot : context.workRoot.appendingPathComponent("src")
             let project = root.appendingPathComponent(request.project)
-            var built = try driver.plan(
+            let built = try driver.plan(
                 project: project,
                 target: request.target,
                 kind: request.kind,
                 tests: request.tests,
                 context: context
             )
-            built.compileThreads = request.threads
             if request.kind != .buildRunAndTests && built.includesTests {
                 throw ControlError.stageNotRequested(.test)
             }

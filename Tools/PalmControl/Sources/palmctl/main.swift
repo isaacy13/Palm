@@ -5,7 +5,7 @@ import PalmControl
 
 private func usage() -> Never {
     let text = """
-    usage: palmctl [--host HOST] [--port PORT] [--threads N] <build|build-and-run|build-run-and-tests> \\
+    usage: palmctl [--host HOST] [--port PORT] <build|build-and-run|build-run-and-tests> \\
         --branch BRANCH --project PATH --target NAME [--repository URL] [--test NAME[,NAME]] [--ui ACTION:NAME]
 
     build stops after compile, link, and sign.
@@ -13,7 +13,6 @@ private func usage() -> Never {
     build-run-and-tests launches and runs the named tests and UI checks.
     Repeat --test, or pass comma-separated names, to compile only those test files.
     Omit --test on build-run-and-tests and every test file is compiled.
-    Omit --threads and the phone uses every performance core.
     Quickstart: Tools/PalmControl/README.md
     UI checks of a guest window need PALM_HOST_BUNDLE_ID and PALM_DEVICE_UDID.
     """
@@ -37,7 +36,6 @@ let branch = take("--branch")
 let project = take("--project")
 let target = take("--target")
 let repository = take("--repository")
-let threads = take("--threads").flatMap { Int($0) }.flatMap { $0 > 0 ? $0 : nil }
 var tests: [String] = []
 while let name = take("--test") {
     for part in name.split(separator: ",") {
@@ -63,8 +61,7 @@ let request = ControlRequest(
     project: project,
     target: target,
     tests: tests,
-    ui: ui,
-    threads: threads
+    ui: ui
 )
 
 do {

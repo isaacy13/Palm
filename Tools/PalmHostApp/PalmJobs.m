@@ -2,7 +2,6 @@
 
 #import <MobileDevelopmentKit/MDKJob.h>
 #import <MobileDevelopmentKit/MDKPhaseRunner.h>
-#import <CoreCompiler/CCUtils.h>
 
 @interface MDKJob (PalmBinary)
 + (instancetype)jobWithType:(MDKJobType)type withArguments:(NSArray<NSString *> *)arguments;
@@ -14,11 +13,6 @@ MDKJob *PalmJob(MDKJobType type, NSArray<NSString *> *arguments, NSArray<NSURL *
 
 MDKJob *PalmLinkerJob(NSArray<NSString *> *arguments) {
     return PalmJob(MDKJobTypeLinker, arguments, @[], nil);
-}
-
-CFIndex PalmMaximumCompileThreads(void) {
-    CFIndex cores = CCGetMaximumPerformanceCores();
-    return cores < 1 ? 1 : cores;
 }
 
 @interface PalmJobDelegate : NSObject <MDKPhaseRunnerDelegate>

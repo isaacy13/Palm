@@ -49,8 +49,6 @@ public struct BuildPlan: Codable, Equatable {
     public var bundleResources: [String] = []
     /// `InfoOverrides.plist` plus `INFOPLIST_KEY_*` usage strings for the signed app.
     public var infoPlist: [String: PlistValue] = [:]
-    /// Requested compile width. Nil means every performance core on the phone.
-    public var compileThreads: Int? = nil
 
     public var descriptionForLog: String {
         var lines: [String] = []
